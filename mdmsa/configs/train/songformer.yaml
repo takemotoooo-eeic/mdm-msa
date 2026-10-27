@@ -1,0 +1,66 @@
+defaults:
+  - default
+  - _self_
+
+trainer:
+  _target_: mdmsa.utils.driver.SongFormerTrainer.build_from_config
+
+evaluator:
+  _target_: mdmsa.utils.driver.SongFormerEvaluator.build_from_config
+
+seed: 42
+
+steps:
+  epochs:
+  iterations: 12010  # optimizer steps
+
+gradient_accumulation_steps: 2
+log_every: 10
+
+ema:
+  _target_: mdmsa.utils.driver.ExponentialMovingAverage
+  beta: 0.9999
+  update_after_step: 200
+  update_every: 10
+
+# Rescales the top-level loss terms so their gradients have equal norm.
+balancer:
+  _target_: mdmsa.utils.driver.Balancer
+  rescale_grads: true
+
+validation:
+  every: 800  # optimizer steps
+  monitor: [HitRate_0.5F, acc]  # improvement in any of these resets patience
+  early_stopping_patience: 3
+
+# Decoding of logits into segments (validation and evaluation).
+postprocess:
+  frame_rate: ${dataloader.frame_rate}
+  local_maxima_filter_size: 3
+  peak_window: 12.0  # seconds
+
+evaluation:
+  use_ema: true
+  rule_post_processing: true
+  output_dir: ${..output.exp_dir}/eval
+  # Name -> label that pre-chorus is renamed to before scoring (null: keep 8 classes).
+  label_mappings:
+    normal:
+    prechorus2verse: verse
+    prechorus2chorus: chorus
+
+output:
+  model:
+    iteration:
+      path: ${...exp_dir}/model/iteration{iteration}.pth
+    best:
+      path: ${...exp_dir}/model/best.pth
+    last:
+      path: ${...exp_dir}/model/last.pth
+
+wandb:
+  _target_: mdmsa.utils.wandb.get_wandb_logger
+  enabled: false
+  project: mdm-msa
+  name: ${..tag}
+  watch: false

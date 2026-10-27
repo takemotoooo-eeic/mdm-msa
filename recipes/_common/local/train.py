@@ -1,10 +1,10 @@
 import hydra
 from omegaconf import DictConfig
 
-import exptemplete
+import mdmsa
 
 
-@exptemplete.main()
+@mdmsa.main()
 def main(config: DictConfig) -> None:
     trainer_config = config.train.trainer
     trainer = hydra.utils.instantiate(trainer_config, config)

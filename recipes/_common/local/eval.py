@@ -1,10 +1,10 @@
 import hydra
 from omegaconf import DictConfig
 
-import exptemplete
+import mdmsa
 
 
-@exptemplete.main()
+@mdmsa.main()
 def main(config: DictConfig) -> None:
     evaluator_config = config.train.evaluator
     evaluator = hydra.utils.instantiate(evaluator_config, config)
