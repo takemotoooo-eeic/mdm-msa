@@ -116,7 +116,7 @@ class SongFormDBDataset(Dataset):
         self,
         subsets: List[Dict[str, Any]],
         num_classes: int = 128,
-        frame_rate: float = 8.333,
+        frame_rate: float = 25 / 3,
         slice_dur: int = 420,
         num_neighbors: int = 10,
     ) -> None:

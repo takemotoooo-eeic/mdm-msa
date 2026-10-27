@@ -6,7 +6,8 @@ defaults:
 
 db_root: data/SongFormerDB
 bench_root: data/SongFormBench
-frame_rate: 8.333  # model output rate (Hz)
+# Model output rate (Hz): 25 Hz input / stride 3 = 25/3. Upstream uses the approximation 8.333.
+frame_rate: 8.333333333333334
 
 _db: ${.db_root}/embeddings
 _bench: ${.bench_root}/embeddings

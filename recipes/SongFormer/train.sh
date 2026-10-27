@@ -21,7 +21,7 @@ while [ ! -f "${project_root}/mdmsa/configs/config.yaml" ]; do
 done
 local_dir="${project_root}/recipes/_common/local"
 
-tag=""
+tag="reg_12000steps"
 db_root="/home/sarulab/kengo_takemoto/data/SongFormerDB"
 bench_root="/home/sarulab/kengo_takemoto/data/SongFormBench"
 base_exp_dir="${project_root}/exp"
