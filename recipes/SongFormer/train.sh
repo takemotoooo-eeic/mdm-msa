@@ -25,8 +25,7 @@ tag=""
 db_root="/home/sarulab/kengo_takemoto/data/SongFormerDB"
 bench_root="/home/sarulab/kengo_takemoto/data/SongFormBench"
 base_exp_dir="${project_root}/exp"
-wandb_enabled=false
-iterations=12010
+wandb_enabled=true
 
 exp_root="exp"
 tensorboard_root="tensorboard"
@@ -37,7 +36,7 @@ model="songformer"
 optimizer="songformer"
 loss="songformer"
 
-help_message="Usage: $0 [--tag TAG] [--db_root DIR] [--bench_root DIR] [--base_exp_dir DIR] [--wandb_enabled true|false] [--iterations N] [hydra overrides...]"
+help_message="Usage: $0 [--tag TAG] [--db_root DIR] [--bench_root DIR] [--base_exp_dir DIR] [--wandb_enabled true|false] [hydra overrides...]"
 
 . "${project_root}/recipes/_common/parse_options.sh"
 
@@ -80,7 +79,6 @@ ${cmd} "${local_dir}/train.py" \
     optimizer="${optimizer}" \
     loss="${loss}" \
     train.tag="${tag}" \
-    train.steps.iterations="${iterations}" \
     train.wandb.enabled="${wandb_enabled}" \
     dataloader.db_root="${db_root}" \
     dataloader.bench_root="${bench_root}" \
