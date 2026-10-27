@@ -1,0 +1,4 @@
+_target_: exptemplete.models.CNNClassifier
+in_channels: 1
+num_classes: 10
+hidden_channels: 32

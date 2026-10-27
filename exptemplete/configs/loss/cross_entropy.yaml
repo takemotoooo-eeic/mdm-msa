@@ -1,0 +1,6 @@
+_target_: exptemplete.loss.TotalLoss
+losses:
+  - _target_: exptemplete.loss.Loss
+    loss_module:
+      _target_: exptemplete.loss.CrossEntropyLoss
+    weight: 1.0

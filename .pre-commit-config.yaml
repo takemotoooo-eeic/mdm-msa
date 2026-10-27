@@ -1,0 +1,10 @@
+# Install: uv sync --extra dev && uv run pre-commit install
+# Run on all files: uv run pre-commit run --all-files
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.2
+    hooks:
+      # Lint first (with autofix, e.g. import sorting), then format.
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format

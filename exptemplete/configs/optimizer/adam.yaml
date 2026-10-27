@@ -1,0 +1,8 @@
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-3
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.StepLR
+  step_size: 1
+  gamma: 0.95

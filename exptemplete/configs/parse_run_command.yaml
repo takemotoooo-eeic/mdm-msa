@@ -1,0 +1,7 @@
+defaults:
+  - config
+  - _self_
+
+hydra:
+  run:
+    dir: ./logs/${now:%Y%m%d-%H%M%S}

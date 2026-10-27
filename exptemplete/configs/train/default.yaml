@@ -1,0 +1,36 @@
+trainer:
+  _target_:
+
+evaluator:
+  _target_:
+
+seed: 0
+
+tag:
+
+torch_dtype: float32
+
+wandb:
+
+output:
+  exp_dir: "exp/"
+  tensorboard_dir: "tensorboard/"
+  features:
+    dir: ${..exp_dir}/features
+    save_every: 10
+    save_initial: true
+  model:
+    epoch:
+      path: ${...exp_dir}/model/epoch{epoch}.pth
+      every: 1
+    best_epoch:
+      path: ${...exp_dir}/model/best_epoch.pth
+    last_epoch:
+      path: ${...exp_dir}/model/last_epoch.pth
+
+steps:
+  epochs:
+  iterations:
+
+checkpoint:
+  resume_from:

@@ -1,0 +1,11 @@
+defaults:
+  - optional dataloader: null
+  - train: default
+  - model: default
+  - optimizer: default
+  - loss: default
+  - _self_
+
+hydra:
+  job:
+    chdir: false

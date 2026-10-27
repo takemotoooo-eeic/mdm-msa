@@ -1,0 +1,25 @@
+defaults:
+  - default
+  - _self_
+
+trainer:
+  _target_: exptemplete.utils.driver.ClassifierTrainer.build_from_config
+
+evaluator:
+  _target_: exptemplete.utils.driver.ClassifierEvaluator.build_from_config
+
+output:
+  model:
+    epoch:
+      every: 1
+
+wandb:
+  _target_: exptemplete.utils.wandb.get_wandb_logger
+  enabled: false
+  project: exp-templete
+  name: ${..tag}
+  watch: true
+  log_image_every: 1
+
+steps:
+  epochs: 5

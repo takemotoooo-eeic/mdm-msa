@@ -1,0 +1,39 @@
+defaults:
+  - default
+  - _self_
+
+train:
+  _target_: torch.utils.data.DataLoader
+  dataset:
+    _target_: exptemplete.utils.data.MNISTDataset
+    root: data
+    train: true
+    download: true
+  batch_size: 64
+  shuffle: true
+  num_workers: 0
+  drop_last: true
+
+validate:
+  _target_: ${..train._target_}
+  dataset:
+    _target_: ${...train.dataset._target_}
+    root: ${...train.dataset.root}
+    train: false
+    download: true
+  batch_size: ${..train.batch_size}
+  shuffle: false
+  num_workers: ${..train.num_workers}
+  drop_last: false
+
+test:
+  _target_: ${..validate._target_}
+  dataset:
+    _target_: ${...validate.dataset._target_}
+    root: ${...validate.dataset.root}
+    train: false
+    download: true
+  batch_size: ${..validate.batch_size}
+  shuffle: false
+  num_workers: ${..validate.num_workers}
+  drop_last: false
