@@ -1,0 +1,12 @@
+optimizer:
+  _target_: torch.optim.Adam
+  lr: 1.0e-4
+  betas: [0.8, 0.999]
+  eps: 1.0e-8
+  weight_decay: 3.0e-7
+
+# Stepped once per optimizer step.
+scheduler:
+  _target_: mdmsa.optim.CosineWarmupLR
+  num_warmup_steps: 300
+  num_training_steps: ${train.steps.iterations}

@@ -1,7 +1,7 @@
 [project]
-name = "exptemplete"
+name = "mdmsa"
 readme = "README.md"
-description = "Research experiment template with Hydra configs, AMP, TensorBoard, and wandb"
+description = "Music structure analysis experiments based on SongFormer"
 authors = [
     {name = "takemotoooo-eeic", email = "takemoto-kengo2262@g.ecc.u-tokyo.ac.jp"}
 ]
@@ -10,13 +10,17 @@ dependencies = [
     "hydra-core>=1.3.0,<2.0",
     "omegaconf>=2.3.0",
     "torch>=2.1.0",
-    "torchvision>=0.16.0",
     "tensorboard>=2.15.0,<3.0",
     "wandb>=0.16.0,<1.0",
     "tqdm>=4.64.0",
     "numpy>=1.24.0",
     "python-dotenv>=1.0.0",
     "packaging>=23.0",
+    "scipy>=1.10.0",
+    "mir_eval>=0.7",
+    "safetensors>=0.4.0",
+    # Pinned: SongFormer checkpoints use the parameter names of this version.
+    "x-transformers==2.4.14",
 ]
 
 dynamic = [
@@ -28,7 +32,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-exptemplete-parse-run-command = "exptemplete.bin.parse_run_command:main"
+mdmsa-parse-run-command = "mdmsa.bin.parse_run_command:main"
 
 [project.optional-dependencies]
 dev = [
@@ -38,13 +42,13 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["exptemplete*"]
+include = ["mdmsa*"]
 
 [tool.setuptools.package-data]
-exptemplete = ["configs/**/*.yaml"]
+mdmsa = ["configs/**/*.yaml"]
 
 [tool.setuptools.dynamic]
-version = {attr = "exptemplete.__version__"}
+version = {attr = "mdmsa.__version__"}
 
 [tool.ruff]
 line-length = 160

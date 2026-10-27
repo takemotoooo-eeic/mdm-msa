@@ -1,0 +1,15 @@
+# SongFormer (upstream configs/SongFormer.yaml). Compatible with the released SongFormer.safetensors.
+_target_: mdmsa.models.SongFormer
+input_dim_raw: 4096  # 4 SSL streams x 1024
+input_dim: 2048
+down_sample_conv_kernel_size: 3
+down_sample_conv_stride: 3  # 25 Hz -> 8.333 Hz
+down_sample_conv_padding: 0
+down_sample_conv_dropout: 0.1
+transformer_encoder_input_dim: 1024
+transformer_input_dim: 512
+num_transformer_layers: 4
+transformer_nhead: 8
+transformer_dropout: 0.1
+num_classes: 128
+num_dataset_classes: 64

@@ -1,0 +1,35 @@
+# Upstream SongFormer loss. The two top-level terms (section, function) are combined by train.balancer.
+_target_: mdmsa.loss.TotalLoss
+losses:
+  - _target_: mdmsa.loss.Loss
+    weight: 0.2
+    loss_module:
+      _target_: mdmsa.loss.TotalLoss
+      losses:
+        - _target_: mdmsa.loss.Loss
+          weight: 1.0
+          loss_module:
+            _target_: mdmsa.loss.BoundaryBCELoss
+        - _target_: mdmsa.loss.Loss
+          weight: 0.05
+          loss_module:
+            _target_: mdmsa.loss.BoundaryTVLoss
+            beta: 0.6
+            lambda_tv: 0.4
+            boundary_threshold: 0.01
+            reduction_weight: 0.1
+  - _target_: mdmsa.loss.Loss
+    weight: 0.8
+    loss_module:
+      _target_: mdmsa.loss.TotalLoss
+      losses:
+        - _target_: mdmsa.loss.Loss
+          weight: 1.0
+          loss_module:
+            _target_: mdmsa.loss.FunctionCrossEntropyLoss
+        - _target_: mdmsa.loss.Loss
+          weight: 0.2
+          loss_module:
+            _target_: mdmsa.loss.FunctionFocalLoss
+            alpha: 0.25
+            gamma: 2.0

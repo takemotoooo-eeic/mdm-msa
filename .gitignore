@@ -229,5 +229,6 @@ __marimo__/
 /results/
 /data/
 /audio/
+/ckpts/
 .DS_Store
 .python-version
