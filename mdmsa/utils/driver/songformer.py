@@ -17,6 +17,7 @@ from tqdm import tqdm
 from ...amp import autocast, get_autocast_device_type, should_enable_amp
 from ...amp.grad_scaler import GradScaler
 from ...loss import TotalLoss
+from ...models.diffuser import MaskedDiffuser
 from .. import convert_dtype, set_device, set_seed
 from .._omegaconf import replace_missing_with_none
 from .._tensorboard import get_writer
@@ -42,15 +43,44 @@ def _to_device(batch: Batch, device: torch.device) -> Batch:
     return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
-def _decode(outputs: Dict[str, torch.Tensor], index: int, label_mask: torch.Tensor, postprocess: DictConfig) -> MsaInfo:
-    function_logits = outputs["function_logits"][index].masked_fill(label_mask.unsqueeze(0), -float("inf"))
+_TOKEN_KEYS = ("boundary_tokens", "function_tokens")
+
+
+def _forward(model: nn.Module, batch: Batch) -> Dict[str, torch.Tensor]:
+    """Training forward. Token inputs are passed when the batch has them (masked diffusion)."""
+    tokens = {key: batch[key] for key in _TOKEN_KEYS if key in batch}
+    return model(batch["embeddings"], batch["dataset_ids"], padding_mask=batch["padding_mask"], **tokens)
+
+
+def _infer(
+    model: nn.Module,
+    diffuser: Optional[MaskedDiffuser],
+    embeddings: torch.Tensor,
+    dataset_ids: torch.Tensor,
+    padding_mask: Optional[torch.Tensor] = None,
+    label_mask: Optional[torch.Tensor] = None,
+) -> Dict[str, torch.Tensor]:
+    """Raw logits (regression) or denoised tokens plus last-step logits (masked diffusion)."""
+    if diffuser is None:
+        return model(embeddings, dataset_ids, padding_mask=padding_mask)
+    return diffuser.inference(model, embeddings, dataset_ids, padding_mask=padding_mask, label_mask=label_mask)
+
+
+def _decode(outputs: Dict[str, torch.Tensor], label_mask: torch.Tensor, postprocess: DictConfig, diffuser: Optional[MaskedDiffuser]) -> MsaInfo:
+    """Segments of one song from its (unbatched) outputs."""
+    if diffuser is not None:
+        return diffuser.decode(outputs)
     return decode_structure(
-        outputs["boundary_logits"][index],
-        function_logits,
+        outputs["boundary_logits"],
+        outputs["function_logits"].masked_fill(label_mask.unsqueeze(0), -float("inf")),
         frame_rate=postprocess.frame_rate,
         local_maxima_filter_size=postprocess.local_maxima_filter_size,
         peak_window=postprocess.peak_window,
     )
+
+
+def _build_diffuser(config: DictConfig) -> Optional[MaskedDiffuser]:
+    return hydra.utils.instantiate(config.diffuser) if config.get("diffuser") else None
 
 
 def _strip_prefix(state_dict: Dict[str, torch.Tensor], prefix: str) -> Dict[str, torch.Tensor]:
@@ -93,6 +123,9 @@ class SongFormerTrainer(Driver):
 
     The top-level terms of ``criterion`` (a :class:`mdmsa.loss.TotalLoss`) are combined by ``balancer`` when one is
     given, otherwise summed. Validation runs on the EMA model every ``train.validation.every`` optimizer steps.
+
+    With a ``diffuser`` (masked diffusion), each training batch is corrupted by :meth:`MaskedDiffuser.add_mask` and
+    validation decodes by :meth:`MaskedDiffuser.inference`; without one, the model is a regressor.
     """
 
     def __init__(
@@ -108,6 +141,7 @@ class SongFormerTrainer(Driver):
         balancer: Optional[Balancer],
         config: DictConfig,
         device: torch.device,
+        diffuser: Optional[MaskedDiffuser] = None,
     ) -> None:
         self.training_dataloader = training_dataloader
         self.validation_dataloader = validation_dataloader
@@ -117,6 +151,7 @@ class SongFormerTrainer(Driver):
         self.scheduler = scheduler
         self.ema = ema
         self.balancer = balancer
+        self.diffuser = diffuser
         self.config = config
         self.loss_names = [_loss_name(loss) for loss in criterion.losses]
 
@@ -160,9 +195,6 @@ class SongFormerTrainer(Driver):
         if self.wandb_logger.enabled:
             self.wandb_logger.add_scalars({f"{prefix}/{k}": v for k, v in metrics.items()}, global_step=self.iteration)
 
-    def _forward(self, model: nn.Module, batch: Batch) -> Dict[str, torch.Tensor]:
-        return model(batch["embeddings"], batch["dataset_ids"], padding_mask=batch["padding_mask"])
-
     def _finished(self) -> bool:
         steps = self.config.train.steps
         if self.stopped_early:
@@ -195,9 +227,11 @@ class SongFormerTrainer(Driver):
             if batch is None:
                 continue
             batch = _to_device(batch, self.device)
+            if self.diffuser is not None:
+                batch = self.diffuser.add_mask(batch)
 
             with autocast(device_type=self.device_type, enabled=self.enable_amp, dtype=self.dtype):
-                outputs = self._forward(self.model, batch)
+                outputs = _forward(self.model, batch)
                 components = [loss(outputs, batch) for loss in self.criterion.losses]
 
             if self.balancer is not None:
@@ -242,12 +276,12 @@ class SongFormerTrainer(Driver):
                 continue
             batch = _to_device(batch, self.device)
             with autocast(device_type=self.device_type, enabled=self.enable_amp, dtype=self.dtype):
-                outputs = self._forward(model, batch)
+                outputs = _infer(model, self.diffuser, batch["embeddings"], batch["dataset_ids"], batch["padding_mask"], batch["label_mask"])
                 loss = float(self.criterion(outputs, batch))
 
             for index, reference in enumerate(batch["msa_infos"]):
                 try:
-                    estimate = _decode(outputs, index, batch["label_mask"][index], postprocess)
+                    estimate = _decode({k: v[index] for k, v in outputs.items()}, batch["label_mask"][index], postprocess, self.diffuser)
                     rows.append({"loss": loss, **segment_metrics(reference, estimate)})
                 except ValueError as error:
                     self.logger.warning(f"Skip {batch['data_ids'][index]} in validation: {error}")
@@ -369,20 +403,25 @@ class SongFormerTrainer(Driver):
             balancer=balancer,
             config=config,
             device=next(model.parameters()).device,
+            diffuser=_build_diffuser(config),
         )
 
 
 class SongFormerEvaluator(Driver):
     """Whole-song inference on pre-extracted features, with scoring when references are available.
 
-    For each song, chunk logits are stitched, decoded into segments (optionally with rule-based cleanup) and written
-    to ``<output_dir>/<subset>/estimations/<song_id>.txt``. With references, per-song metrics and summaries are
-    written for every entry of ``train.evaluation.label_mappings`` (e.g. pre-chorus -> verse).
+    For each song, chunk outputs (logits, or tokens with a ``diffuser``) are stitched, decoded into segments
+    (optionally with rule-based cleanup) and written to ``<output_dir>/<subset>/estimations/<song_id>.txt``. With
+    references, per-song metrics and summaries are written for every entry of ``train.evaluation.label_mappings``
+    (e.g. pre-chorus -> verse).
     """
 
-    def __init__(self, *, dataloader: DataLoader, model: nn.Module, config: DictConfig, device: torch.device) -> None:
+    def __init__(
+        self, *, dataloader: DataLoader, model: nn.Module, config: DictConfig, device: torch.device, diffuser: Optional[MaskedDiffuser] = None
+    ) -> None:
         self.dataloader = dataloader
         self.model = model
+        self.diffuser = diffuser
         self.config = config
         self.device = device
 
@@ -408,18 +447,13 @@ class SongFormerEvaluator(Driver):
         chunks: List[Tuple[float, Dict[str, torch.Tensor]]] = []
         for start, embeddings in song["chunks"]:
             with autocast(device_type=self.device_type, enabled=self.enable_amp, dtype=self.dtype):
-                outputs = self.model(torch.from_numpy(embeddings).unsqueeze(0).to(self.device), dataset_ids, label_mask=label_mask.unsqueeze(0))
+                embeddings = torch.from_numpy(embeddings).unsqueeze(0).to(self.device)
+                outputs = _infer(self.model, self.diffuser, embeddings, dataset_ids, label_mask=label_mask.unsqueeze(0))
             chunks.append((start, {k: v[0] for k, v in outputs.items()}))
 
         postprocess = self.config.train.postprocess
-        logits = stitch_chunk_logits(chunks, frame_rate=postprocess.frame_rate)
-        estimate = decode_structure(
-            logits["boundary_logits"],
-            logits["function_logits"],
-            frame_rate=postprocess.frame_rate,
-            local_maxima_filter_size=postprocess.local_maxima_filter_size,
-            peak_window=postprocess.peak_window,
-        )
+        stitched = stitch_chunk_logits(chunks, frame_rate=postprocess.frame_rate)
+        estimate = _decode(stitched, label_mask, postprocess, self.diffuser)
         if self.config.train.evaluation.rule_post_processing:
             estimate = rule_post_processing(estimate)
         return estimate
@@ -494,4 +528,4 @@ class SongFormerEvaluator(Driver):
 
         dataloader = hydra.utils.instantiate(config.dataloader.test)
         model = set_device(hydra.utils.instantiate(config.model), accelerator=accelerator)
-        return cls(dataloader=dataloader, model=model, config=config, device=next(model.parameters()).device)
+        return cls(dataloader=dataloader, model=model, config=config, device=next(model.parameters()).device, diffuser=_build_diffuser(config))

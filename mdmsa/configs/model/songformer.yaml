@@ -13,3 +13,4 @@ transformer_nhead: 8
 transformer_dropout: 0.1
 num_classes: 128
 num_dataset_classes: 64
+use_dataset_id: true  # false: drop the dataset (data source) prefix embedding

@@ -35,6 +35,7 @@ class SongFormerCollator:
 
         embeddings = np.zeros((batch_size, input_length, feature_dim), dtype=np.float32)
         padding_mask = np.ones((batch_size, length), dtype=bool)
+        boundary_events = np.zeros((batch_size, length), dtype=np.float32)
         boundary_targets = np.zeros((batch_size, length), dtype=np.float32)
         function_targets = np.zeros((batch_size, length, num_classes), dtype=np.float32)
         boundary_mask = np.zeros((batch_size, length), dtype=bool)
@@ -44,6 +45,7 @@ class SongFormerCollator:
             embeddings[i, : item["embeddings"].shape[0]] = item["embeddings"]
             n = min(length, item["padding_mask"].shape[0])
             padding_mask[i, :n] = item["padding_mask"][:n]
+            boundary_events[i, :n] = item["boundary_events"][:n]
             boundary_targets[i, :n] = item["boundary_targets"][:n]
             function_targets[i, :n] = item["function_targets"][:n]
             boundary_mask[i, :n] = item["boundary_mask"][:n]
@@ -53,6 +55,7 @@ class SongFormerCollator:
             "data_ids": [x["data_id"] for x in batch],
             "embeddings": torch.from_numpy(embeddings),
             "padding_mask": torch.from_numpy(padding_mask),
+            "boundary_events": torch.from_numpy(boundary_events),
             "boundary_targets": torch.from_numpy(boundary_targets),
             "function_targets": torch.from_numpy(function_targets),
             "boundary_mask": torch.from_numpy(boundary_mask),

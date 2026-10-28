@@ -1,0 +1,7 @@
+# SongFormer conditioned on masked boundary / function tokens. Use with train=songformer_diffusion.
+defaults:
+  - songformer
+  - _self_
+
+_target_: mdmsa.models.SongFormerDiffusion
+scale_token_embed: false

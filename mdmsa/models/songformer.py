@@ -113,6 +113,9 @@ class SongFormer(nn.Module):
 
     Input is the concatenation of four SSL streams (MusicFM / MuQ, 30 s and 420 s windows) at 25 Hz.
     Output frames are downsampled by ``down_sample_conv_stride``.
+
+    With ``use_dataset_id=False`` the dataset (data source) prefix embedding is not created and ``dataset_ids`` is
+    ignored, so annotation-policy differences between training datasets are not given to the model.
     """
 
     def __init__(
@@ -130,10 +133,13 @@ class SongFormer(nn.Module):
         transformer_dropout: float = 0.1,
         num_classes: int = 128,
         num_dataset_classes: int = 64,
+        use_dataset_id: bool = True,
     ) -> None:
         super().__init__()
         self.downsample_rate = down_sample_conv_stride
         self.num_classes = num_classes
+        self.transformer_encoder_input_dim = transformer_encoder_input_dim
+        self.use_dataset_id = use_dataset_id
 
         self.mixed_win_downsample = nn.Linear(input_dim_raw, input_dim)
         self.input_norm = nn.LayerNorm(input_dim)
@@ -145,7 +151,8 @@ class SongFormer(nn.Module):
             padding=down_sample_conv_padding,
             dropout=down_sample_conv_dropout,
         )
-        self.dataset_class_prefix = nn.Embedding(num_dataset_classes, transformer_encoder_input_dim)
+        if use_dataset_id:
+            self.dataset_class_prefix = nn.Embedding(num_dataset_classes, transformer_encoder_input_dim)
         self.transformer = TransformerEncoder(
             input_dim=transformer_encoder_input_dim,
             dim=transformer_input_dim,
@@ -155,6 +162,25 @@ class SongFormer(nn.Module):
         )
         self.boundary_head = Head(transformer_input_dim, 1)
         self.function_head = Head(transformer_input_dim, num_classes)
+
+    def encode(self, embeddings: torch.Tensor, dataset_ids: torch.Tensor) -> torch.Tensor:
+        """Downsampled audio features with the dataset prefix: ``(B, T, transformer_encoder_input_dim)``."""
+        x = self.input_norm(self.mixed_win_downsample(embeddings))
+        x = self.down_sample_conv(x)
+        if not self.use_dataset_id:
+            return x
+        return x + self.dataset_class_prefix(dataset_ids).unsqueeze(1)
+
+    def predict(self, x: torch.Tensor, padding_mask: Optional[torch.Tensor] = None, label_mask: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Transformer and heads on encoded features."""
+        x = self.transformer(x, padding_mask=padding_mask)
+
+        boundary_logits = self.boundary_head(x).squeeze(-1)
+        function_logits = self.function_head(x)
+        if label_mask is not None:
+            function_logits = function_logits.masked_fill(label_mask.unsqueeze(1), -float("inf"))
+
+        return {"boundary_logits": boundary_logits, "function_logits": function_logits}
 
     def forward(
         self,
@@ -173,14 +199,4 @@ class SongFormer(nn.Module):
         Returns:
             ``boundary_logits`` ``(B, T)`` and ``function_logits`` ``(B, T, num_classes)``.
         """
-        x = self.input_norm(self.mixed_win_downsample(embeddings))
-        x = self.down_sample_conv(x)
-        x = x + self.dataset_class_prefix(dataset_ids).unsqueeze(1)
-        x = self.transformer(x, padding_mask=padding_mask)
-
-        boundary_logits = self.boundary_head(x).squeeze(-1)
-        function_logits = self.function_head(x)
-        if label_mask is not None:
-            function_logits = function_logits.masked_fill(label_mask.unsqueeze(1), -float("inf"))
-
-        return {"boundary_logits": boundary_logits, "function_logits": function_logits}
+        return self.predict(self.encode(embeddings, dataset_ids), padding_mask=padding_mask, label_mask=label_mask)

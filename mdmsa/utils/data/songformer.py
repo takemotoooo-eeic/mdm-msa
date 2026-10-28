@@ -275,6 +275,7 @@ class SongFormDBDataset(Dataset):
 
         return {
             "padding_mask": padding_mask,
+            "boundary_events": boundaries.astype(np.float32),
             "boundary_targets": self._widen(boundaries).astype(np.float32),
             "function_targets": function_targets,
             "boundary_mask": boundary_mask,

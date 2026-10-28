@@ -1,0 +1,24 @@
+# Masked diffusion over boundary / function tokens (md-songformer defaults: section masking, dynamic unmasking).
+_target_: mdmsa.models.MaskedDiffuser
+num_classes: ${model.num_classes}
+frame_rate: ${dataloader.frame_rate}
+
+# ---- Training corruption (add_mask) ----
+mask_ratio_min: 0.05  # per-song mask ratio ~ U(min, max), drawn separately for each channel
+mask_ratio_max: 1.0
+p_all_mask: 0.4  # probability of hiding every token of a song (the inference starting point)
+function_masking: section  # random | random_span | section | section_merged
+function_span_seconds: 5.0  # mean span length for random_span
+balance_boundary_mask: false  # hide NO_EVENT : EVENT at alpha : 1 instead of uniformly
+alpha: 150  # target NO_EVENT : EVENT ratio (balance_boundary_mask, fixed_alpha)
+
+# ---- Inference (inference / unmask) ----
+boundary:
+  num_inference_steps: 1
+  unmask_strategy: dynamic  # dynamic | fixed_alpha | confidence
+  confidence: logit_abs  # logit_abs | softmax
+function:
+  num_inference_steps: 1
+  confidence: logit_abs
+  unmask_unit: frame  # frame | segment (reveal whole segments after all boundaries are revealed)
+boundary_peak_window: 15  # keep one EVENT per window (frames, odd); 0 disables
