@@ -1,0 +1,6 @@
+# Masked diffusion with the same frames hidden in boundary and function (random_span spans, both channels at once).
+defaults:
+  - masked_diffusion
+  - _self_
+
+sync_mask: true

@@ -13,7 +13,7 @@ Inference (:meth:`MaskedDiffuser.inference`) starts from all-``MASK`` and reveal
 """
 
 import math
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -26,8 +26,10 @@ __all__ = ["MaskedDiffuser"]
 
 Batch = Dict[str, Any]
 
-_FUNCTION_MASKINGS = ("random", "random_span", "section", "section_merged")
-_BOUNDARY_UNMASK_STRATEGIES = ("dynamic", "fixed_alpha", "confidence")
+_BOUNDARY_MASKINGS = ("random", "all_mask")
+_FUNCTION_MASKINGS = ("random", "random_span", "section", "section_merged", "all_mask")
+_PATTERN_KEYS = {"type", "prob", "ratio_min", "ratio_max", "span_seconds"}
+_BOUNDARY_UNMASK_STRATEGIES = ("dynamic", "confidence")
 _CONFIDENCES = ("logit_abs", "softmax")
 _FUNCTION_UNMASK_UNITS = ("frame", "segment")
 
@@ -38,23 +40,31 @@ class MaskedDiffuser:
     Args:
         num_classes: Size of the functional label space.
         frame_rate: Frame rate of the tokens (Hz).
-        mask_ratio_min: Lower bound of the per-song mask ratio.
-        mask_ratio_max: Upper bound of the per-song mask ratio.
-        p_all_mask: Probability that a song has every token hidden (the inference starting point).
-        function_masking: How function tokens are hidden: ``random`` frames, ``random_span`` spans, whole ``section`` s
-            (split at ground-truth boundaries) or ``section_merged`` (runs of the same label).
-        function_span_seconds: Mean span length for ``random_span``.
-        balance_boundary_mask: Hide ``NO_EVENT`` and ``EVENT`` at the ratio ``alpha : 1`` instead of uniformly.
-        alpha: Target ``NO_EVENT : EVENT`` count ratio, used by ``balance_boundary_mask`` and ``fixed_alpha`` unmasking.
-        boundary: Inference settings of the boundary channel: ``num_inference_steps``, ``unmask_strategy``
-            (``dynamic`` / ``fixed_alpha`` / ``confidence``) and ``confidence`` (``logit_abs`` / ``softmax``).
-        function: Inference settings of the function channel: ``num_inference_steps``, ``confidence`` and
+        boundary_masking: Masking patterns of the boundary channel, one drawn per song. Each is a dict with ``type``,
+            ``prob`` (the probabilities must sum to 1) and, except for ``all_mask``, the mask ratio range
+            ``ratio_min`` / ``ratio_max`` (ratio ~ ``U(ratio_min, ratio_max)``). Types: ``random`` frames (hidden
+            ``NO_EVENT`` / ``EVENT`` keep the song's own ratio) and ``all_mask`` (every token hidden, the inference
+            starting point).
+        function_masking: Masking patterns of the function channel, drawn per song independently of the boundary
+            channel. Types: ``random`` frames, ``random_span`` (label-independent spans of mean ``span_seconds``,
+            default 5), ``section`` (whole sections split at ground-truth boundaries), ``section_merged`` (runs of the
+            same label) and ``all_mask``.
+        boundary_inference: Inference settings of the boundary channel: ``num_inference_steps``, ``unmask_strategy``
+            (``dynamic`` / ``confidence``), ``confidence`` (``logit_abs`` / ``softmax``) and ``peak_window``: after
+            each boundary step, keep one ``EVENT`` per window (frames, odd) and set the rest of the window to
+            ``NO_EVENT`` (``0`` disables it).
+        function_inference: Inference settings of the function channel: ``num_inference_steps``, ``confidence`` and
             ``unmask_unit``. ``frame`` (default) reveals single frames together with the boundary steps. ``segment``
             waits until every boundary is revealed, then reveals whole segments (between ``EVENT`` s) with the label of
             highest mean probability, most confident segments first; it adds ``num_inference_steps`` model calls after
             the boundary steps and ignores ``confidence``.
-        boundary_peak_window: After each boundary step, keep one ``EVENT`` per window (frames, odd) and set the
-            rest of the window to ``NO_EVENT``. ``0`` disables it.
+        sync_mask: Hide the same frames in both channels: ``function_masking`` draws one mask per song (on frames where
+            either channel is supervised) and ``boundary_masking`` is not used. ``all_mask`` then hides both channels.
+        function_noise: Corrupt part of the *visible* function tokens so the model learns that revealed tokens can be
+            wrong (at inference they are its own predictions). ``prob``: share of songs that get noise (``0`` disables);
+            ``max_ratio``: per song, a share ``U(0, max_ratio)`` of the visible label runs gets another label of the same
+            song, drawn in proportion to its frame count (majority labels more often). In those songs every visible
+            function frame is also supervised, so the model learns to keep correct tokens and fix wrong ones.
     """
 
     BOUNDARY_MASK = 0
@@ -67,43 +77,38 @@ class MaskedDiffuser:
         self,
         num_classes: int = 128,
         frame_rate: float = 25 / 3,
-        mask_ratio_min: float = 0.05,
-        mask_ratio_max: float = 1.0,
-        p_all_mask: float = 0.4,
-        function_masking: str = "section",
-        function_span_seconds: float = 5.0,
-        balance_boundary_mask: bool = False,
-        alpha: float = 150.0,
-        boundary: Optional[Mapping[str, Any]] = None,
-        function: Optional[Mapping[str, Any]] = None,
-        boundary_peak_window: int = 15,
+        boundary_masking: Optional[Sequence[Mapping[str, Any]]] = None,
+        function_masking: Optional[Sequence[Mapping[str, Any]]] = None,
+        sync_mask: bool = False,
+        function_noise: Optional[Mapping[str, Any]] = None,
+        boundary_inference: Optional[Mapping[str, Any]] = None,
+        function_inference: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        boundary = dict(boundary or {})
-        function = dict(function or {})
+        boundary = dict(boundary_inference or {})
+        function = dict(function_inference or {})
+        function_noise = dict(function_noise or {})
+        for name, given, allowed in (
+            ("boundary_inference", boundary, {"num_inference_steps", "unmask_strategy", "confidence", "peak_window"}),
+            ("function_inference", function, {"num_inference_steps", "confidence", "unmask_unit"}),
+            ("function_noise", function_noise, {"prob", "max_ratio"}),
+        ):
+            if set(given) - allowed:
+                raise ValueError(f"{name}: unknown keys {sorted(set(given) - allowed)}.")
 
-        if not 0 <= mask_ratio_min <= mask_ratio_max <= 1:
-            raise ValueError("Requires 0 <= mask_ratio_min <= mask_ratio_max <= 1.")
-        if not 0 <= p_all_mask <= 1:
-            raise ValueError("p_all_mask must be in [0, 1].")
-        if function_masking not in _FUNCTION_MASKINGS:
-            raise ValueError(f"function_masking must be one of {_FUNCTION_MASKINGS}.")
-        if not math.isfinite(alpha) or alpha < 0:
-            raise ValueError("alpha must be finite and nonnegative.")
-        if boundary_peak_window < 0 or (boundary_peak_window > 0 and boundary_peak_window % 2 == 0):
-            raise ValueError("boundary_peak_window must be 0 or a positive odd integer.")
+        peak_window = int(boundary.get("peak_window", 15))
+        if peak_window < 0 or (peak_window > 0 and peak_window % 2 == 0):
+            raise ValueError("boundary_inference.peak_window must be 0 or a positive odd integer.")
 
         self.num_classes = int(num_classes)
         self.frame_rate = float(frame_rate)
         self.FUNCTION_MASK = self.num_classes
         self.FUNCTION_PAD = self.num_classes + 1
 
-        self.mask_ratio_min = float(mask_ratio_min)
-        self.mask_ratio_max = float(mask_ratio_max)
-        self.p_all_mask = float(p_all_mask)
-        self.function_masking = function_masking
-        self.function_span_frames = max(1.0, function_span_seconds * self.frame_rate)
-        self.balance_boundary_mask = bool(balance_boundary_mask)
-        self.alpha = float(alpha)
+        default = [{"type": "random", "prob": 0.6}, {"type": "all_mask", "prob": 0.4}]
+        self.boundary_masking = self._parse_patterns(boundary_masking or default, _BOUNDARY_MASKINGS, "boundary_masking")
+        default = [{"type": "random_span", "prob": 0.6}, {"type": "all_mask", "prob": 0.4}]
+        self.function_masking = self._parse_patterns(function_masking or default, _FUNCTION_MASKINGS, "function_masking")
+        self.sync_mask = bool(sync_mask)
 
         self.boundary_steps = int(boundary.get("num_inference_steps", 1))
         self.boundary_unmask_strategy = boundary.get("unmask_strategy", "dynamic")
@@ -111,16 +116,45 @@ class MaskedDiffuser:
         self.function_steps = int(function.get("num_inference_steps", 1))
         self.function_confidence = function.get("confidence", "logit_abs")
         self.function_unmask_unit = function.get("unmask_unit", "frame")
-        self.boundary_peak_window = int(boundary_peak_window)
+        self.boundary_peak_window = peak_window
+        self.function_noise_prob = float(function_noise.get("prob", 0.0))
+        self.function_noise_max_ratio = float(function_noise.get("max_ratio", 0.3))
+        if not 0 <= self.function_noise_prob <= 1 or not 0 <= self.function_noise_max_ratio <= 1:
+            raise ValueError("function_noise.prob and function_noise.max_ratio must be in [0, 1].")
 
         if self.boundary_steps < 1 or self.function_steps < 1:
             raise ValueError("num_inference_steps must be positive.")
         if self.boundary_unmask_strategy not in _BOUNDARY_UNMASK_STRATEGIES:
-            raise ValueError(f"boundary.unmask_strategy must be one of {_BOUNDARY_UNMASK_STRATEGIES}.")
+            raise ValueError(f"boundary_inference.unmask_strategy must be one of {_BOUNDARY_UNMASK_STRATEGIES}.")
         if self.boundary_confidence not in _CONFIDENCES or self.function_confidence not in _CONFIDENCES:
             raise ValueError(f"confidence must be one of {_CONFIDENCES}.")
         if self.function_unmask_unit not in _FUNCTION_UNMASK_UNITS:
-            raise ValueError(f"function.unmask_unit must be one of {_FUNCTION_UNMASK_UNITS}.")
+            raise ValueError(f"function_inference.unmask_unit must be one of {_FUNCTION_UNMASK_UNITS}.")
+
+    def _parse_patterns(self, patterns: Sequence[Mapping[str, Any]], types: Tuple[str, ...], name: str) -> List[Dict[str, Any]]:
+        parsed = []
+        for pattern in patterns:
+            pattern = dict(pattern)
+            unknown = set(pattern) - _PATTERN_KEYS
+            if unknown:
+                raise ValueError(f"{name}: unknown keys {sorted(unknown)}.")
+            if pattern.get("type") not in types:
+                raise ValueError(f"{name}: type must be one of {types}.")
+            if "span_seconds" in pattern and pattern["type"] != "random_span":
+                raise ValueError(f"{name}: span_seconds is only for random_span.")
+            item = {
+                "type": pattern["type"],
+                "prob": float(pattern.get("prob", 0.0)),
+                "ratio_min": float(pattern.get("ratio_min", 0.05)),
+                "ratio_max": float(pattern.get("ratio_max", 1.0)),
+                "span_frames": max(1.0, float(pattern.get("span_seconds", 5.0)) * self.frame_rate),
+            }
+            if item["prob"] < 0 or not 0 <= item["ratio_min"] <= item["ratio_max"] <= 1:
+                raise ValueError(f"{name}: requires prob >= 0 and 0 <= ratio_min <= ratio_max <= 1.")
+            parsed.append(item)
+        if not parsed or not math.isclose(sum(p["prob"] for p in parsed), 1.0, abs_tol=1e-6):
+            raise ValueError(f"{name}: the probabilities must sum to 1.")
+        return parsed
 
     @staticmethod
     def function_vocab_size(num_classes: int) -> int:
@@ -151,21 +185,29 @@ class MaskedDiffuser:
         """Corrupt a training batch.
 
         Adds ``boundary_tokens`` / ``function_tokens`` (model inputs) and adds the visible frames to
-        ``boundary_mask`` / ``function_mask``, so the losses only see hidden frames. Each channel draws its own
-        mask ratio and positions; with probability ``p_all_mask`` a song is hidden completely.
+        ``boundary_mask`` / ``function_mask``, so the losses only see hidden frames. Each song draws one pattern per
+        channel from ``boundary_masking`` / ``function_masking``, with its own mask ratio (with ``sync_mask``, one
+        ``function_masking`` pattern hides the same frames in both channels).
         """
         boundary, function = self.tokenize(batch)
-        boundary_noisy, boundary_hidden = self._mask_boundary(boundary)
-        function_noisy, function_hidden = self._mask_function(function, boundary)
+        boundary_valid, function_valid = boundary != self.BOUNDARY_PAD, function != self.FUNCTION_PAD
+        if self.sync_mask:
+            valid = boundary_valid | function_valid
+            hidden = self._sample_hidden(
+                self.function_masking, valid, lambda p, rows, r: self._function_hidden(p, function[rows], boundary[rows], r, valid=valid[rows])
+            )
+            boundary_hidden, function_hidden = hidden & boundary_valid, hidden & function_valid
+        else:
+            boundary_hidden = self._sample_hidden(self.boundary_masking, boundary_valid, lambda p, rows, r: self._boundary_hidden(p, boundary[rows], r))
+            function_hidden = self._sample_hidden(
+                self.function_masking, function_valid, lambda p, rows, r: self._function_hidden(p, function[rows], boundary[rows], r)
+            )
+        boundary_noisy = boundary.masked_fill(boundary_hidden, self.BOUNDARY_MASK)
+        function_noisy = function.masked_fill(function_hidden, self.FUNCTION_MASK)
 
-        if self.p_all_mask > 0:
-            all_rows = (torch.rand(boundary.shape[0], device=boundary.device) < self.p_all_mask).unsqueeze(1)
-            boundary_valid = boundary != self.BOUNDARY_PAD
-            function_valid = function != self.FUNCTION_PAD
-            boundary_hidden = torch.where(all_rows, boundary_valid, boundary_hidden)
-            function_hidden = torch.where(all_rows, function_valid, function_hidden)
-            boundary_noisy = boundary_noisy.masked_fill(all_rows & boundary_valid, self.BOUNDARY_MASK)
-            function_noisy = function_noisy.masked_fill(all_rows & function_valid, self.FUNCTION_MASK)
+        if self.function_noise_prob > 0:
+            function_noisy, supervised = self._corrupt_visible_function(function_noisy, function)
+            function_hidden = function_hidden | supervised
 
         return {
             **batch,
@@ -175,41 +217,79 @@ class MaskedDiffuser:
             "function_mask": batch["function_mask"] | ~function_hidden,
         }
 
-    def _mask_ratios(self, batch_size: int, device: torch.device) -> torch.Tensor:
-        return torch.empty(batch_size, device=device).uniform_(self.mask_ratio_min, self.mask_ratio_max)
+    @staticmethod
+    def _sample_hidden(
+        patterns: List[Dict[str, Any]], valid: torch.Tensor, hide: Callable[[Dict[str, Any], torch.Tensor, torch.Tensor], torch.Tensor]
+    ) -> torch.Tensor:
+        """Hidden frames ``(B, T)``: one pattern per song, ``hide(pattern, rows, ratios)`` for the songs that drew it."""
+        probs = torch.tensor([p["prob"] for p in patterns])
+        choice = torch.multinomial(probs, valid.shape[0], replacement=True).to(valid.device)
+        hidden = torch.zeros_like(valid)
+        for index, pattern in enumerate(patterns):
+            rows = choice == index
+            n_rows = int(rows.sum().item())
+            if n_rows == 0:
+                continue
+            if pattern["type"] == "all_mask":
+                hidden[rows] = valid[rows]
+                continue
+            ratios = torch.empty(n_rows, device=valid.device).uniform_(pattern["ratio_min"], pattern["ratio_max"])
+            hidden[rows] = hide(pattern, rows, ratios) & valid[rows]
+        return hidden
 
-    def _random_mask(self, tokens: torch.Tensor, pad_id: int, mask_id: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        ratios = self._mask_ratios(tokens.shape[0], tokens.device)
-        hidden = (torch.rand(tokens.shape, device=tokens.device) < ratios.unsqueeze(1)) & (tokens != pad_id)
-        return tokens.masked_fill(hidden, mask_id), hidden
+    @staticmethod
+    def _boundary_hidden(pattern: Dict[str, Any], tokens: torch.Tensor, ratios: torch.Tensor) -> torch.Tensor:
+        return torch.rand(tokens.shape, device=tokens.device) < ratios.unsqueeze(1)  # random
 
-    def _mask_boundary(self, tokens: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if not self.balance_boundary_mask:
-            return self._random_mask(tokens, self.BOUNDARY_PAD, self.BOUNDARY_MASK)
+    def _function_hidden(
+        self, pattern: Dict[str, Any], tokens: torch.Tensor, boundary: torch.Tensor, ratios: torch.Tensor, valid: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """``valid`` (default: non-``PAD`` function frames) sets where ``random_span`` places its spans."""
+        if pattern["type"] == "random":
+            return torch.rand(tokens.shape, device=tokens.device) < ratios.unsqueeze(1)
+        if pattern["type"] == "random_span":
+            return self._random_span_mask(tokens != self.FUNCTION_PAD if valid is None else valid, ratios, pattern["span_frames"])
+        sections = self._section_ids(tokens, boundary if pattern["type"] == "section" else None)
+        n_sections = sections.amax(dim=-1)
+        k = torch.minimum(torch.round(ratios * n_sections.float()).long().clamp(min=0), n_sections)
+        # A positive ratio on a short song would otherwise round down to zero sections.
+        k = torch.where((ratios > 0) & (n_sections > 0) & (k == 0), torch.ones_like(k), k)
+        return self._select_sections(sections, k)
 
-        is_event = tokens == self.BOUNDARY_EVENT
-        is_no_event = tokens == self.BOUNDARY_NO_EVENT
-        n_event, n_no_event = is_event.sum(dim=-1), is_no_event.sum(dim=-1)
-        n_valid = n_event + n_no_event
-        k = torch.round(self._mask_ratios(tokens.shape[0], tokens.device) * n_valid.float()).long()
-        k_event, k_no_event = self._class_quotas(torch.minimum(k.clamp(min=0), n_valid), n_event, n_no_event)
-        hidden = self._select_random(is_event, k_event) | self._select_random(is_no_event, k_no_event)
-        return tokens.masked_fill(hidden, self.BOUNDARY_MASK), hidden
+    def _corrupt_visible_function(self, noisy: torch.Tensor, clean: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Give some visible label runs another label of the same song (see ``function_noise``).
 
-    def _mask_function(self, tokens: torch.Tensor, boundary: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if self.function_masking == "random":
-            return self._random_mask(tokens, self.FUNCTION_PAD, self.FUNCTION_MASK)
-        if self.function_masking == "random_span":
-            hidden = self._random_span_mask(tokens != self.FUNCTION_PAD)
-        else:
-            sections = self._section_ids(tokens, boundary if self.function_masking == "section" else None)
-            n_sections = sections.amax(dim=-1)
-            ratios = self._mask_ratios(tokens.shape[0], tokens.device)
-            k = torch.minimum(torch.round(ratios * n_sections.float()).long().clamp(min=0), n_sections)
-            # A positive ratio on a short song would otherwise round down to zero sections.
-            k = torch.where((ratios > 0) & (n_sections > 0) & (k == 0), torch.ones_like(k), k)
-            hidden = self._select_sections(sections, k)
-        return tokens.masked_fill(hidden, self.FUNCTION_MASK), hidden
+        Returns the corrupted tokens and the visible frames of the noised songs (to be supervised).
+        """
+        batch_size = noisy.shape[0]
+        visible = (noisy != self.FUNCTION_MASK) & (noisy != self.FUNCTION_PAD)
+        starts = torch.ones_like(visible)
+        starts[:, 1:] = (noisy[:, 1:] != noisy[:, :-1]) | ~visible[:, :-1]
+        runs = (starts & visible).long().cumsum(dim=-1).masked_fill(~visible, 0)  # (B, T), 0 = not visible
+        n_runs = runs.amax(dim=-1)
+        noised_rows = (torch.rand(batch_size, device=noisy.device) < self.function_noise_prob) & (n_runs > 0)
+        if not noised_rows.any():
+            return noisy, torch.zeros_like(visible)
+
+        ratios = torch.rand(batch_size, device=noisy.device) * self.function_noise_max_ratio
+        k = torch.round(ratios * n_runs.float()).long().masked_fill(~noised_rows, 0)
+        chosen = self._select_sections(runs, k)  # frames of the chosen runs
+
+        # Replacement label per run: another label of the song, weighted by its frame count.
+        valid = clean != self.FUNCTION_PAD
+        counts = torch.zeros(batch_size, self.num_classes, device=noisy.device)
+        counts.scatter_add_(1, clean.masked_fill(~valid, 0), valid.float())
+        max_runs = int(n_runs.max().item())
+        run_label = torch.zeros(batch_size, max_runs + 1, dtype=torch.long, device=noisy.device)
+        run_label.scatter_(1, runs, noisy.masked_fill(~visible, 0))
+        weights = counts.unsqueeze(1).repeat(1, max_runs + 1, 1).scatter_(2, run_label.unsqueeze(-1), 0.0)
+        has_other = weights.sum(dim=-1) > 0
+        weights = torch.where(has_other.unsqueeze(-1), weights, torch.ones_like(weights))
+        new_label = torch.multinomial(weights.flatten(0, 1), 1).view(batch_size, max_runs + 1)
+
+        corrupt = chosen & has_other.gather(1, runs)
+        noisy = torch.where(corrupt, new_label.gather(1, runs), noisy)
+        return noisy, visible & noised_rows.unsqueeze(1)
 
     def _section_ids(self, tokens: torch.Tensor, boundary: Optional[torch.Tensor]) -> torch.Tensor:
         """Section index per frame (0 for ``PAD``). A section is a run of one label, also split at ``EVENT`` frames."""
@@ -245,14 +325,14 @@ class MaskedDiffuser:
         cuts = (torch.randperm(total - 1, device=device)[: parts - 1] + 1).sort().values
         return torch.cat((cuts.new_zeros(1), cuts, cuts.new_full((1,), total))).diff()
 
-    def _random_span_mask(self, valid: torch.Tensor) -> torch.Tensor:
+    @classmethod
+    def _random_span_mask(cls, valid: torch.Tensor, ratios: torch.Tensor, span_frames: float) -> torch.Tensor:
         """Hide ``round(ratio * valid_frames)`` frames as label-independent random spans.
 
         Each contiguous valid run gets its proportional share (randomized rounding keeps the song total). Within a run,
-        hidden and visible spans alternate with random lengths (mean ``function_span_seconds``) and a random rotation.
+        hidden and visible spans alternate with random lengths (mean ``span_frames``) and a random rotation.
         """
         batch_size = valid.shape[0]
-        ratios = self._mask_ratios(batch_size, valid.device)
         n_valid = valid.sum(dim=-1)
         budgets = torch.round(ratios * n_valid).long()
         budgets = torch.minimum(torch.where((ratios > 0) & (n_valid > 0), budgets.clamp(min=1), budgets), n_valid)
@@ -282,39 +362,14 @@ class MaskedDiffuser:
                 if n_hidden == length:
                     hidden[row, start:end] = True
                     continue
-                n_spans = max(1, min(round(n_hidden / self.function_span_frames), n_hidden, length - n_hidden))
-                hidden_lengths = self._random_partition(n_hidden, n_spans, valid.device)
-                visible_lengths = self._random_partition(length - n_hidden, n_spans, valid.device)
+                n_spans = max(1, min(round(n_hidden / span_frames), n_hidden, length - n_hidden))
+                hidden_lengths = cls._random_partition(n_hidden, n_spans, valid.device)
+                visible_lengths = cls._random_partition(length - n_hidden, n_spans, valid.device)
                 span_ends = torch.stack((visible_lengths, hidden_lengths), dim=-1).flatten().cumsum(dim=0)
                 shift = torch.randint(length, (1,), device=valid.device)
                 positions = (torch.arange(length, device=valid.device) + shift) % length
                 hidden[row, start:end] = torch.searchsorted(span_ends, positions, right=True).remainder(2) == 1
         return hidden
-
-    @staticmethod
-    def _select_random(eligible: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-        """``k`` random ``eligible`` frames per row."""
-        max_k = int(k.max().item()) if k.numel() else 0
-        if max_k <= 0:
-            return torch.zeros_like(eligible)
-        scores = torch.rand(eligible.shape, device=eligible.device).masked_fill(~eligible, -1.0)
-        top_scores, idx = scores.topk(max_k, dim=-1)
-        take = (torch.arange(max_k, device=eligible.device).unsqueeze(0) < k.unsqueeze(1)) & (top_scores >= 0)
-        return torch.zeros_like(eligible).scatter_(1, idx, take)
-
-    def _class_quotas(self, k: torch.Tensor, n_event: torch.Tensor, n_no_event: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Split a budget ``k`` into ``EVENT`` / ``NO_EVENT`` counts at about ``1 : alpha``.
-
-        Leftover budget goes to whichever class still has positions, so the total stays ``k`` when possible.
-        """
-        k, n_event, n_no_event = k.long(), n_event.long(), n_no_event.long()
-        k_event = torch.round(k.float() / (1.0 + self.alpha)).long()
-        k_event = torch.where((n_event > 0) & (k > 0) & (k_event == 0), torch.ones_like(k_event), k_event)
-        k_event = torch.minimum(torch.minimum(k_event, n_event), k)
-        k_no_event = torch.minimum(k - k_event, n_no_event)
-        k_event = k_event + torch.minimum(k - k_event - k_no_event, (n_event - k_event).clamp(min=0))
-        k_no_event = k_no_event + torch.minimum(k - k_event - k_no_event, (n_no_event - k_no_event).clamp(min=0))
-        return k_event, k_no_event
 
     # ----------------------------------------------------------------- inference
 
@@ -377,12 +432,9 @@ class MaskedDiffuser:
             k = torch.minimum(k.clamp(min=0), remaining)
             predicted_event = still_masked & (predicted == self.BOUNDARY_EVENT)
             predicted_no_event = still_masked & (predicted == self.BOUNDARY_NO_EVENT)
-            if self.boundary_unmask_strategy == "dynamic":
-                # Follow the model's own EVENT ratio among the masked frames.
-                k_event = torch.round(k.double() * predicted_event.sum(dim=-1) / remaining.clamp(min=1)).long()
-                k_no_event = k - k_event
-            else:
-                k_event, k_no_event = self._class_quotas(k, predicted_event.sum(dim=-1), predicted_no_event.sum(dim=-1))
+            # dynamic: follow the model's own EVENT ratio among the masked frames.
+            k_event = torch.round(k.double() * predicted_event.sum(dim=-1) / remaining.clamp(min=1)).long()
+            k_no_event = k - k_event
             tokens = self._unmask_topk(tokens, predicted, confidence, predicted_event, k_event)
             tokens = self._unmask_topk(tokens, predicted, confidence, predicted_no_event, k_no_event)
 

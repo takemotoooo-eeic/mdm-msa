@@ -144,13 +144,16 @@ regressing logits. It shares the dataset, metrics and drivers with the regressio
 
 `mdmsa.models.MaskedDiffuser` ([`configs/diffuser/masked_diffusion.yaml`](mdmsa/configs/diffuser/masked_diffusion.yaml)) does the diffusion part:
 
-- `add_mask`: hides a random share of the ground-truth tokens of each training batch (`function_masking`: `random`,
-  `random_span`, `section`, `section_merged`; `p_all_mask` hides whole songs) and restricts the loss to hidden frames.
+- `add_mask`: hides part of the ground-truth tokens of each training batch and restricts the loss to hidden frames.
+  `boundary_masking` / `function_masking` are lists of patterns, one drawn per song and channel by `prob`, each with its
+  own mask ratio range (boundary: `random`, `all_mask`; function: `random`, `random_span`, `section`,
+  `section_merged`, `all_mask`). `function_noise` gives part of the visible function tokens a wrong label.
 - `inference` / `unmask`: starts from all-MASK and reveals tokens by confidence over `num_inference_steps`
-  (`unmask_strategy`: `dynamic`, `fixed_alpha`, `confidence`), keeping one boundary per `boundary_peak_window` frames.
+  (`unmask_strategy`: `dynamic`, `confidence`), keeping one boundary per `boundary_inference.peak_window` frames.
 - `decode`: every boundary EVENT starts a segment labelled by its majority function token.
 
-Override settings with e.g. `diffuser.boundary.num_inference_steps=4 diffuser.function_masking=random_span`.
+Override settings with e.g. `diffuser.boundary_inference.num_inference_steps=4` or
+`'diffuser.function_masking=[{type:random_span,prob:0.6,ratio_min:0.05,ratio_max:1.0},{type:all_mask,prob:0.4}]'`.
 
 ## Without the dataset id
 

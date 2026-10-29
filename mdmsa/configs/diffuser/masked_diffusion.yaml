@@ -1,24 +1,31 @@
-# Masked diffusion over boundary / function tokens (md-songformer defaults: section masking, dynamic unmasking).
+# Masked diffusion over boundary / function tokens (random_span function masking, dynamic unmasking).
 _target_: mdmsa.models.MaskedDiffuser
 num_classes: ${model.num_classes}
 frame_rate: ${dataloader.frame_rate}
 
 # ---- Training corruption (add_mask) ----
-mask_ratio_min: 0.05  # per-song mask ratio ~ U(min, max), drawn separately for each channel
-mask_ratio_max: 1.0
-p_all_mask: 0.4  # probability of hiding every token of a song (the inference starting point)
-function_masking: section  # random | random_span | section | section_merged
-function_span_seconds: 5.0  # mean span length for random_span
-balance_boundary_mask: false  # hide NO_EVENT : EVENT at alpha : 1 instead of uniformly
-alpha: 150  # target NO_EVENT : EVENT ratio (balance_boundary_mask, fixed_alpha)
+# One pattern per song and channel, drawn by prob (must sum to 1); mask ratio ~ U(ratio_min, ratio_max).
+# boundary types: random | all_mask (every token hidden, the inference start)
+boundary_masking:
+  - {type: random, prob: 0.6, ratio_min: 0.05, ratio_max: 1.0}
+  - {type: all_mask, prob: 0.4}
+# function types: random | random_span (span_seconds: mean span, default 5) | section | section_merged | all_mask
+function_masking:
+  - {type: random_span, prob: 0.6, ratio_min: 0.05, ratio_max: 1.0, span_seconds: 5.0}
+  - {type: all_mask, prob: 0.4}
+sync_mask: false  # true: hide the same frames in both channels (function_masking only; boundary_masking unused)
+
+function_noise:  # corrupt visible function tokens during training (revealed tokens can be wrong at inference)
+  prob: 0.0  # share of songs with noise; 0 disables
+  max_ratio: 0.3  # per song, U(0, max_ratio) of the visible label runs get another label of the song
 
 # ---- Inference (inference / unmask) ----
-boundary:
+boundary_inference:
   num_inference_steps: 1
-  unmask_strategy: dynamic  # dynamic | fixed_alpha | confidence
+  unmask_strategy: dynamic  # dynamic | confidence
   confidence: logit_abs  # logit_abs | softmax
-function:
+  peak_window: 15  # keep one EVENT per window (frames, odd); 0 disables
+function_inference:
   num_inference_steps: 1
   confidence: logit_abs
   unmask_unit: frame  # frame | segment (reveal whole segments after all boundaries are revealed)
-boundary_peak_window: 15  # keep one EVENT per window (frames, odd); 0 disables
