@@ -1,0 +1,30 @@
+# Masked diffusion loss (md-songformer): losses averaged over hidden frames only, TV loss off.
+_target_: mdmsa.loss.TotalLoss
+losses:
+  - _target_: mdmsa.loss.Loss
+    weight: 0.2
+    loss_module:
+      _target_: mdmsa.loss.TotalLoss
+      losses:
+        - _target_: mdmsa.loss.Loss
+          weight: 1.0
+          loss_module:
+            _target_: mdmsa.loss.BoundaryBCELoss
+            reduction: masked_mean
+  - _target_: mdmsa.loss.Loss
+    weight: 0.8
+    loss_module:
+      _target_: mdmsa.loss.TotalLoss
+      losses:
+        - _target_: mdmsa.loss.Loss
+          weight: 1.0
+          loss_module:
+            _target_: mdmsa.loss.FunctionCrossEntropyLoss
+            reduction: masked_mean
+        - _target_: mdmsa.loss.Loss
+          weight: 0.2
+          loss_module:
+            _target_: mdmsa.loss.FunctionFocalLoss
+            alpha: 0.25
+            gamma: 2.0
+            reduction: masked_mean

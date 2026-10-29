@@ -31,7 +31,7 @@ balancer:
 validation:
   every: 800  # optimizer steps
   monitor: [HitRate_0.5F, acc]  # improvement in any of these resets patience
-  early_stopping_patience: 3
+  early_stopping_patience: null
 
 # Decoding of logits into segments (validation and evaluation).
 postprocess:

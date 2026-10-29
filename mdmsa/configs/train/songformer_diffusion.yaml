@@ -1,0 +1,5 @@
+# Masked diffusion training / evaluation. Adds the top-level `diffuser` config (select another with diffuser=<name>).
+defaults:
+  - songformer
+  - /diffuser@_global_.diffuser: masked_diffusion
+  - _self_

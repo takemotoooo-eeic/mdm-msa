@@ -20,6 +20,7 @@ __all__ = [
     "decode_structure",
     "rule_post_processing",
     "stitch_chunk_logits",
+    "structure_from_tokens",
 ]
 
 
@@ -112,25 +113,56 @@ def rule_post_processing(msa_info: MsaInfo, min_edge_duration: float = 1.0, max_
 
 
 def stitch_chunk_logits(chunks: Iterable[Tuple[float, Dict[str, torch.Tensor]]], frame_rate: float) -> Dict[str, torch.Tensor]:
-    """Place per-chunk logits on the song timeline and average where chunks overlap.
+    """Place per-chunk frame tensors on the song timeline.
+
+    Floating-point tensors (logits) are averaged where chunks overlap; other tensors (tokens) take the later chunk.
 
     Args:
-        chunks: ``(start_sec, {"boundary_logits": (T,), "function_logits": (T, C)})`` per chunk.
-        frame_rate: Frames per second of the logits.
+        chunks: ``(start_sec, {name: (T, ...)})`` per chunk, e.g. ``boundary_logits`` ``(T,)`` and ``function_logits``
+            ``(T, C)``.
+        frame_rate: Frames per second of the tensors.
     """
-    placed = [(int(start * frame_rate), logits) for start, logits in chunks]
-    length = max(offset + logits["boundary_logits"].shape[0] for offset, logits in placed)
-    num_classes = placed[0][1]["function_logits"].shape[-1]
-    device = placed[0][1]["boundary_logits"].device
+    placed = [(int(start * frame_rate), tensors) for start, tensors in chunks]
+    length = max(offset + next(iter(tensors.values())).shape[0] for offset, tensors in placed)
 
-    boundary = torch.zeros(length, device=device)
-    function = torch.zeros(length, num_classes, device=device)
-    count = torch.zeros(length, device=device)
-    for offset, logits in placed:
-        n = logits["boundary_logits"].shape[0]
-        boundary[offset : offset + n] += logits["boundary_logits"].float()
-        function[offset : offset + n] += logits["function_logits"].float()
-        count[offset : offset + n] += 1
+    stitched: Dict[str, torch.Tensor] = {}
+    for name, first in placed[0][1].items():
+        is_float = first.is_floating_point()
+        out = torch.zeros((length, *first.shape[1:]), dtype=torch.float32 if is_float else first.dtype, device=first.device)
+        count = torch.zeros(length, device=first.device)
+        for offset, tensors in placed:
+            value = tensors[name]
+            n = value.shape[0]
+            if is_float:
+                out[offset : offset + n] += value.float()
+            else:
+                out[offset : offset + n] = value
+            count[offset : offset + n] += 1
+        if is_float:
+            out = out / count.clamp(min=1).view(-1, *([1] * (out.dim() - 1)))
+        stitched[name] = out
+    return stitched
 
-    count = count.clamp(min=1)
-    return {"boundary_logits": boundary / count, "function_logits": function / count.unsqueeze(-1)}
+
+def structure_from_tokens(boundary_tokens: torch.Tensor, function_tokens: torch.Tensor, frame_rate: float, event_id: int, num_classes: int) -> MsaInfo:
+    """Segments from fully unmasked tokens ``(T,)`` of one song.
+
+    Every ``event_id`` frame starts a segment; its label is the most frequent label token inside it. Segments without
+    a label token (only ``MASK`` / ``PAD``) are dropped, so the previous segment extends over them.
+    """
+    boundary = boundary_tokens.detach().cpu().numpy()
+    function = function_tokens.detach().cpu().numpy()
+    length = len(boundary)
+
+    cuts = [0, *(int(i) for i in np.flatnonzero(boundary == event_id) if i > 0), length]
+    segments: MsaInfo = []
+    for start, end in zip(cuts[:-1], cuts[1:]):
+        labels = function[start:end]
+        labels = labels[(labels >= 0) & (labels < num_classes)]
+        if len(labels) > 0:
+            segments.append((start / frame_rate, ID_TO_LABEL[int(np.bincount(labels).argmax())]))
+
+    if not segments:
+        segments.append((0.0, ID_TO_LABEL[0]))
+    segments.append((length / frame_rate, END_LABEL))
+    return segments

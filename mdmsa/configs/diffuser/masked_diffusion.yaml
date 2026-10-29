@@ -1,0 +1,31 @@
+# Masked diffusion over boundary / function tokens (random_span function masking, dynamic unmasking).
+_target_: mdmsa.models.MaskedDiffuser
+num_classes: ${model.num_classes}
+frame_rate: ${dataloader.frame_rate}
+
+# ---- Training corruption (add_mask) ----
+# One pattern per song and channel, drawn by prob (must sum to 1); mask ratio ~ U(ratio_min, ratio_max).
+# boundary types: random | all_mask (every token hidden, the inference start)
+boundary_masking:
+  - {type: random, prob: 0.6, ratio_min: 0.05, ratio_max: 1.0}
+  - {type: all_mask, prob: 0.4}
+# function types: random | random_span (span_seconds: mean span, default 5) | section | section_merged | all_mask
+function_masking:
+  - {type: random_span, prob: 0.6, ratio_min: 0.05, ratio_max: 1.0, span_seconds: 5.0}
+  - {type: all_mask, prob: 0.4}
+sync_mask: false  # true: hide the same frames in both channels (function_masking only; boundary_masking unused)
+
+function_noise:  # corrupt visible function tokens during training (revealed tokens can be wrong at inference)
+  prob: 0.0  # share of songs with noise; 0 disables
+  max_ratio: 0.3  # per song, U(0, max_ratio) of the visible label runs get another label of the song
+
+# ---- Inference (inference / unmask) ----
+boundary_inference:
+  num_inference_steps: 1
+  unmask_strategy: dynamic  # dynamic | confidence
+  confidence: logit_abs  # logit_abs | softmax
+  peak_window: 15  # keep one EVENT per window (frames, odd); 0 disables
+function_inference:
+  num_inference_steps: 1
+  confidence: logit_abs
+  unmask_unit: frame  # frame | segment (reveal whole segments after all boundaries are revealed)

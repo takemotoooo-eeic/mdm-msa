@@ -18,8 +18,11 @@ mdmsa/                       # installable Python package
     loss/songformer.yaml
     optimizer/songformer.yaml
     train/songformer.yaml
+    diffuser/masked_diffusion.yaml   # masked diffusion settings (with *_diffusion model / loss / train)
   loss/songformer.py         # BoundaryBCELoss, BoundaryTVLoss, FunctionCrossEntropyLoss, FunctionFocalLoss
   models/songformer.py       # SongFormer (loads the released checkpoint unchanged)
+  models/songformer_diffusion.py  # SongFormerDiffusion (masked diffusion variant)
+  models/diffuser.py         # MaskedDiffuser: add_mask / unmask / inference / decode
   optim/                     # CosineWarmupLR
   utils/
     data/                    # SongFormDBDataset, SongFormBenchDataset, label tables
@@ -56,7 +59,11 @@ Both datasets are read as features laid out like this:
 
 - **SongFormDB** (training, `--db_root`): subsets `HX`, `Ext`, `Hook`, `Gem`, with `train_meta/labels/*.jsonl` and `train_meta/splits/*.txt`.
   `HX` validation (`hx_val.txt`) is used for validation during training.
-- **SongFormBench** (evaluation, `--bench_root`): subsets `HarmonixSet`, `CN`, with references in `data/labels/<subset>/<song_id>.txt`.
+- **SongFormBench** (evaluation, `--bench_root`): subsets `HarmonixSet`, `CN`, `RWC-P`, with references in `data/labels/<subset>/<song_id>.txt`.
+  `RWC-P` (RWC Music Database Popular, 100 songs) is added locally from the
+  [AIST CHORUS annotations](https://github.com/rwc-music/rwc-annotations-archive): `<bench_root>/utils/RWC-P/prepare_labels.py`
+  converts the labels (`verse A` → verse, `post-chorus` → chorus, `ending` → outro, `nothing` → silence, pre-chorus kept) and
+  `extract_features.sh` extracts the features with the md-songformer scripts.
 
 | Subset | Dataset id | Supervision |
 | --- | --- | --- |
@@ -113,6 +120,51 @@ Released checkpoint on SongFormBench (`prechorus2verse`):
 | --- | --- | --- | --- |
 | HarmonixSet | 0.807 | 0.713 | 0.799 |
 | CN | 0.895 | 0.696 | 0.864 |
+| RWC-P | 0.745 | 0.711 | 0.800 |
+
+RWC-P `prechorus2verse` follows the protocol of [Wang et al. 2022](https://arxiv.org/abs/2205.14700) (AIST annotations, same label
+rules), whose best RWC-Pop result is ACC 0.675 / HR.5F 0.623 (SpecTNT, cross-dataset). AIST `bridge` is mostly instrumental
+interludes and is kept as `bridge` for comparability, which is the main source of RWC-P label errors.
+
+## Masked diffusion
+
+A masked discrete diffusion variant (after md-songformer) predicts boundary and function **tokens** instead of
+regressing logits. It shares the dataset, metrics and drivers with the regression model; only these groups change:
+
+| Group | Regression | Masked diffusion |
+| --- | --- | --- |
+| `model` | `songformer` | `songformer_diffusion` (adds boundary / function token embeddings) |
+| `loss` | `songformer` | `songformer_diffusion` (loss on hidden frames only, no TV) |
+| `train` | `songformer` | `songformer_diffusion` (adds the `diffuser` config) |
+
+```bash
+./recipes/SongFormer/train.sh --tag md_42 --train songformer_diffusion --model songformer_diffusion --loss songformer_diffusion
+./recipes/SongFormer/eval.sh --checkpoint exp/md_42/exp/model/best.pth --train songformer_diffusion --model songformer_diffusion --loss songformer_diffusion
+```
+
+`mdmsa.models.MaskedDiffuser` ([`configs/diffuser/masked_diffusion.yaml`](mdmsa/configs/diffuser/masked_diffusion.yaml)) does the diffusion part:
+
+- `add_mask`: hides part of the ground-truth tokens of each training batch and restricts the loss to hidden frames.
+  `boundary_masking` / `function_masking` are lists of patterns, one drawn per song and channel by `prob`, each with its
+  own mask ratio range (boundary: `random`, `all_mask`; function: `random`, `random_span`, `section`,
+  `section_merged`, `all_mask`). `function_noise` gives part of the visible function tokens a wrong label.
+- `inference` / `unmask`: starts from all-MASK and reveals tokens by confidence over `num_inference_steps`
+  (`unmask_strategy`: `dynamic`, `confidence`), keeping one boundary per `boundary_inference.peak_window` frames.
+- `decode`: every boundary EVENT starts a segment labelled by its majority function token.
+
+Override settings with e.g. `diffuser.boundary_inference.num_inference_steps=4` or
+`'diffuser.function_masking=[{type:random_span,prob:0.6,ratio_min:0.05,ratio_max:1.0},{type:all_mask,prob:0.4}]'`.
+
+## Without the dataset id
+
+`model=songformer_no_dataset_id` / `model=songformer_diffusion_no_dataset_id` drop the dataset (data source) prefix
+embedding, so annotation-policy differences between training datasets are no longer given to the model:
+
+```bash
+./recipes/SongFormer/train.sh --tag reg_nodsid --dataloader songformdb --model songformer_no_dataset_id
+./recipes/SongFormer/train.sh --tag md_nodsid --dataloader songformdb --train songformer_diffusion --model songformer_diffusion_no_dataset_id --loss songformer_diffusion
+./recipes/SongFormer/eval.sh --checkpoint exp/md_nodsid/exp/model/best.pth --dataloader songformdb --train songformer_diffusion --model songformer_diffusion_no_dataset_id --loss songformer_diffusion
+```
 
 ## AMP
 

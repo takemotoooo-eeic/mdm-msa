@@ -1,4 +1,4 @@
-# Train / validate on SongFormDB (HX + Ext + Hook + Gem), test on SongFormBench (HarmonixSet + CN).
+# Train / validate on SongFormDB (HX + Ext + Hook + Gem), test on SongFormBench (HarmonixSet + CN + RWC-P).
 # Features: <root>/embeddings/{30s_420s,420s}/<subset>/{musicfm,muq}_hop420/layer_10/<song_id>_<start>.npy
 defaults:
   - default
@@ -114,6 +114,13 @@ test:
           - ${dataloader._bench}/30s_420s/CN/muq_hop420/layer_10
           - ${dataloader._bench}/420s/CN/musicfm_hop420/layer_10
           - ${dataloader._bench}/420s/CN/muq_hop420/layer_10
+      - name: RWC-P
+        label_dir: ${dataloader.bench_root}/data/labels/RWC-P
+        embedding_dirs:
+          - ${dataloader._bench}/30s_420s/RWC-P/musicfm_hop420/layer_10
+          - ${dataloader._bench}/30s_420s/RWC-P/muq_hop420/layer_10
+          - ${dataloader._bench}/420s/RWC-P/musicfm_hop420/layer_10
+          - ${dataloader._bench}/420s/RWC-P/muq_hop420/layer_10
   collate_fn:
     _target_: mdmsa.utils.collator.SongCollator
   batch_size: 1

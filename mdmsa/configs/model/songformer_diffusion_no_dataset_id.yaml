@@ -1,0 +1,6 @@
+# Masked diffusion SongFormer without the dataset-id (data source) prefix. Use with train=songformer_diffusion.
+defaults:
+  - songformer_diffusion
+  - _self_
+
+use_dataset_id: false

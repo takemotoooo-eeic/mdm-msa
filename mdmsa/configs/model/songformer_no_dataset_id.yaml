@@ -1,0 +1,6 @@
+# SongFormer without the dataset-id (data source) prefix. Same architecture otherwise.
+defaults:
+  - songformer
+  - _self_
+
+use_dataset_id: false
