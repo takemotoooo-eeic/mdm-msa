@@ -1,0 +1,101 @@
+# Label-only data: train / validate on SongFormDB-HX, test on SongFormBench (HarmonixSet + CN + RWC-P).
+# Functional targets use the compact label list below (class i = labels[i]): the 8 labels occurring in HX train.
+# Features: <root>/embeddings/{30s_420s,420s}/<subset>/{musicfm,muq}_hop420/layer_10/<song_id>_<start>.npy
+defaults:
+  - default
+  - _self_
+
+db_root: data/SongFormerDB
+bench_root: data/SongFormBench
+# Model output rate (Hz): 25 Hz input / stride 3 = 25/3. Upstream uses the approximation 8.333.
+frame_rate: 8.333333333333334
+
+labels: [intro, verse, chorus, bridge, inst, outro, silence, pre-chorus]
+
+_db: ${.db_root}/embeddings
+_bench: ${.bench_root}/embeddings
+
+train:
+  _target_: torch.utils.data.DataLoader
+  dataset:
+    _target_: mdmsa.utils.data.CompactLabelSongFormDBDataset
+    labels: ${dataloader.labels}
+    frame_rate: ${dataloader.frame_rate}
+    slice_dur: 420
+    num_neighbors: 10
+    subsets:
+      - name: HX
+        dataset: SongForm-HX-8Class
+        label_path: ${dataloader.db_root}/train_meta/labels/HX.jsonl
+        split_path: ${dataloader.db_root}/train_meta/splits/hx_train.txt
+        embedding_dirs:
+          - ${dataloader._db}/30s_420s/HX/musicfm_hop420/layer_10
+          - ${dataloader._db}/30s_420s/HX/muq_hop420/layer_10
+          - ${dataloader._db}/420s/HX/musicfm_hop420/layer_10
+          - ${dataloader._db}/420s/HX/muq_hop420/layer_10
+  collate_fn:
+    _target_: mdmsa.utils.collator.SongFormerCollator
+    downsample_rate: ${model.down_sample_conv_stride}
+  batch_size: 4
+  shuffle: true
+  num_workers: 4
+  pin_memory: true
+  prefetch_factor: 4
+  persistent_workers: true
+  drop_last: true
+
+# Slice-level validation on SongFormDB-HX val (batch size must be 1).
+validate:
+  _target_: torch.utils.data.DataLoader
+  dataset:
+    _target_: mdmsa.utils.data.CompactLabelSongFormDBDataset
+    labels: ${dataloader.labels}
+    frame_rate: ${dataloader.frame_rate}
+    slice_dur: 420
+    num_neighbors: 10
+    subsets:
+      - name: HX
+        dataset: SongForm-HX-8Class
+        label_path: ${dataloader.db_root}/train_meta/labels/HX.jsonl
+        split_path: ${dataloader.db_root}/train_meta/splits/hx_val.txt
+        embedding_dirs: ${dataloader.train.dataset.subsets[0].embedding_dirs}
+  collate_fn: ${..train.collate_fn}
+  batch_size: 1
+  shuffle: false
+  num_workers: 2
+  drop_last: false
+
+# Whole-song evaluation on SongFormBench (batch size must be 1).
+test:
+  _target_: torch.utils.data.DataLoader
+  dataset:
+    _target_: mdmsa.utils.data.CompactLabelSongFormBenchDataset
+    labels: ${dataloader.labels}
+    dataset: SongForm-HX-8Class
+    subsets:
+      - name: HarmonixSet
+        label_dir: ${dataloader.bench_root}/data/labels/HarmonixSet
+        embedding_dirs:
+          - ${dataloader._bench}/30s_420s/HarmonixSet/musicfm_hop420/layer_10
+          - ${dataloader._bench}/30s_420s/HarmonixSet/muq_hop420/layer_10
+          - ${dataloader._bench}/420s/HarmonixSet/musicfm_hop420/layer_10
+          - ${dataloader._bench}/420s/HarmonixSet/muq_hop420/layer_10
+      - name: CN
+        label_dir: ${dataloader.bench_root}/data/labels/CN
+        embedding_dirs:
+          - ${dataloader._bench}/30s_420s/CN/musicfm_hop420/layer_10
+          - ${dataloader._bench}/30s_420s/CN/muq_hop420/layer_10
+          - ${dataloader._bench}/420s/CN/musicfm_hop420/layer_10
+          - ${dataloader._bench}/420s/CN/muq_hop420/layer_10
+      - name: RWC-P
+        label_dir: ${dataloader.bench_root}/data/labels/RWC-P
+        embedding_dirs:
+          - ${dataloader._bench}/30s_420s/RWC-P/musicfm_hop420/layer_10
+          - ${dataloader._bench}/30s_420s/RWC-P/muq_hop420/layer_10
+          - ${dataloader._bench}/420s/RWC-P/musicfm_hop420/layer_10
+          - ${dataloader._bench}/420s/RWC-P/muq_hop420/layer_10
+  collate_fn:
+    _target_: mdmsa.utils.collator.SongCollator
+  batch_size: 1
+  shuffle: false
+  num_workers: 2

@@ -1,0 +1,11 @@
+# SongFormer denoiser for D3RM: label-token embedding added to the audio features + diffusion-step AdaLN.
+defaults:
+  - songformer
+  - _self_
+
+_target_: mdmsa.models.SongFormerD3RM
+num_classes: 8  # = len(dataloader.labels); the MASK token is added by the model
+diffusion_step: ${train.diffuser.diffusion_step}
+zero_init_label_embed: false
+pretrained_path:
+pretrained_labels:

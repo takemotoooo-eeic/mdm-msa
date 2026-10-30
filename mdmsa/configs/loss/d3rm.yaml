@@ -1,0 +1,11 @@
+# D3RM objective: L = L_vlb + auxiliary_loss_weight * L_x0 (d3rm configs/D3RM_cli.yaml: auxiliary_loss_weight 5.0e-4).
+_target_: mdmsa.loss.TotalLoss
+losses:
+  - _target_: mdmsa.loss.Loss
+    weight: 1.0
+    loss_module:
+      _target_: mdmsa.loss.D3RMVBLoss
+  - _target_: mdmsa.loss.Loss
+    weight: 5.0e-4
+    loss_module:
+      _target_: mdmsa.loss.D3RMAuxLoss

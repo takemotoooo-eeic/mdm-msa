@@ -1,0 +1,13 @@
+# Functional-label terms of the SongFormer loss only (no boundary terms).
+_target_: mdmsa.loss.TotalLoss
+losses:
+  - _target_: mdmsa.loss.Loss
+    weight: 1.0
+    loss_module:
+      _target_: mdmsa.loss.FunctionCrossEntropyLoss
+  - _target_: mdmsa.loss.Loss
+    weight: 0.2
+    loss_module:
+      _target_: mdmsa.loss.FunctionFocalLoss
+      alpha: 0.25
+      gamma: 2.0

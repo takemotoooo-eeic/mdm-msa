@@ -1,0 +1,29 @@
+# D3RM (mask + uniform discrete diffusion) on the label-only setup. Use with model=songformer_d3rm, loss=d3rm.
+# Diffusion settings follow d3rm configs/D3RM_cli.yaml (diffusion_step 100, adaptive aux loss, mask_weight [1, 1],
+# reverse (absorbing state) sampling from the fully masked sequence).
+defaults:
+  - songformer_label
+  - _self_
+
+trainer:
+  _target_: mdmsa.utils.driver.D3RMTrainer.build_from_config
+
+evaluator:
+  _target_: mdmsa.utils.driver.D3RMEvaluator.build_from_config
+
+diffuser:
+  _target_: mdmsa.models.D3RMDiffusion
+  num_classes: ${model.num_classes}
+  diffusion_step: 100
+  gamma_bar_T: 0.6  # final mask share; 1 - gamma_bar_T of the frames are uniformly replaced at t = T (1.0: mask only)
+  adaptive_auxiliary_loss: true
+  mask_weight: [1.0, 1.0]
+  reverse_sampling: true
+  time_sampling: importance
+
+validation:
+  sample: true  # full T-step sampling for acc (acc_onestep is always reported)
+  max_sample_batches:  # null: every validation slice
+
+evaluation:
+  prediction: sample  # sample | onestep

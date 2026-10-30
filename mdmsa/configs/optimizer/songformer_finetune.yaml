@@ -1,0 +1,7 @@
+# Fine-tuning from released SongFormer weights: SongFormer's optimizer with a 5x smaller learning rate.
+defaults:
+  - songformer
+  - _self_
+
+optimizer:
+  lr: 2.0e-5

@@ -1,9 +1,12 @@
 import torch
 import torch.nn as nn
 
+from .d3rm import D3RMAuxLoss, D3RMVBLoss
 from .songformer import BoundaryBCELoss, BoundaryTVLoss, FunctionCrossEntropyLoss, FunctionFocalLoss
 
 __all__ = [
+    "D3RMVBLoss",
+    "D3RMAuxLoss",
     "BoundaryBCELoss",
     "BoundaryTVLoss",
     "FunctionCrossEntropyLoss",

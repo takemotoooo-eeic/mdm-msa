@@ -1,0 +1,9 @@
+# D3RM denoiser initialised from the released SongFormer weights. New parameters (label-token embedding,
+# AdaLN step embeddings) start at zero output, so step 0 of training is the pretrained SongFormer.
+defaults:
+  - songformer_d3rm
+  - _self_
+
+zero_init_label_embed: true
+pretrained_path: ckpts/SongFormer.safetensors
+pretrained_labels: ${dataloader.labels}

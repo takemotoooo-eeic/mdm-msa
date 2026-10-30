@@ -1,0 +1,6 @@
+# SongFormer predicting only the compact functional labels (the boundary head is kept but not trained).
+defaults:
+  - songformer
+  - _self_
+
+num_classes: 8  # = len(dataloader.labels)

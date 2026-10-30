@@ -1,0 +1,25 @@
+# Label-only SongFormer on HX (dataloader=songformdb_hx_label): no boundary loss, frame label accuracy for validation.
+defaults:
+  - songformer
+  - _self_
+
+trainer:
+  _target_: mdmsa.utils.driver.LabelSongFormerTrainer.build_from_config
+
+evaluator:
+  _target_: mdmsa.utils.driver.LabelSongFormerEvaluator.build_from_config
+
+labels: ${dataloader.labels}
+
+steps:
+  iterations: 6000
+
+balancer:  # a single loss group: plain sum
+
+validation:
+  every: 100
+  monitor: [acc]
+  early_stopping_patience:
+
+evaluation:
+  rule_post_processing: false
