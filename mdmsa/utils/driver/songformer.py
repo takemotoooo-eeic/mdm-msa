@@ -427,12 +427,9 @@ class SongFormerEvaluator(Driver):
     def run(self) -> Dict[str, Dict[str, float]]:
         evaluation_config = self.config.train.evaluation
         output_dir = evaluation_config.output_dir
-        mappings = dict(evaluation_config.label_mappings)
         self.model.eval()
 
-        per_song: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
-        overlaps: Dict[Tuple[str, str], List[Dict[str, Tuple[float, float]]]] = defaultdict(list)
-
+        scored: List[Tuple[str, str, MsaInfo, MsaInfo]] = []
         for song in tqdm(self.dataloader, desc="Evaluation"):
             estimate = self.predict(song)
 
@@ -441,33 +438,69 @@ class SongFormerEvaluator(Driver):
             with open(os.path.join(estimation_dir, f"{song['song_id']}.txt"), "w") as f:
                 f.write("\n".join(f"{t:.3f} {label}" for t, label in estimate) + "\n")
 
-            if song["msa_info"] is None:
-                continue
+            if song["msa_info"] is not None:
+                scored.append((song["subset"], song["song_id"], song["msa_info"], estimate))
+
+        return self.score(scored, evaluation_config, output_dir, self.logger)
+
+    @classmethod
+    def score(
+        cls,
+        songs: List[Tuple[str, str, MsaInfo, MsaInfo]],
+        evaluation_config: DictConfig,
+        output_dir: str,
+        logger: Any,
+    ) -> Dict[str, Dict[str, float]]:
+        """Score ``(subset, song_id, reference, estimate)`` tuples and write per-song / summary files.
+
+        ``evaluation_config.estimate_label_mappings`` (subset -> {predicted label: label}) renames predicted labels
+        first (e.g. RWC-P, whose references have no ``inst``: ``inst -> bridge``); saved estimations stay as predicted.
+        Then every ``label_mappings`` entry renames pre-chorus on both sides. Labels are only renamed: adjacent segments
+        are not merged, so boundaries are unchanged. Also used to rescore saved estimations without a model.
+        """
+        mappings = dict(evaluation_config.label_mappings)
+        estimate_mappings = evaluation_config.get("estimate_label_mappings") or {}
+
+        per_song: Dict[Tuple[str, str], List[Dict[str, Any]]] = defaultdict(list)
+        overlaps: Dict[Tuple[str, str], List[Dict[str, Tuple[float, float]]]] = defaultdict(list)
+        for subset, song_id, reference_info, estimate in songs:
+            for source, target in (estimate_mappings.get(subset) or {}).items():
+                estimate = replace_label(estimate, source, target)
             for name, target in mappings.items():
-                reference = replace_label(song["msa_info"], "pre-chorus", target)
+                reference = replace_label(reference_info, "pre-chorus", target)
                 mapped = replace_label(estimate, "pre-chorus", target)
                 try:
                     metrics = segment_metrics(reference, mapped)
                 except ValueError as error:
-                    self.logger.warning(f"Skip {song['song_id']} ({name}): {error}")
+                    logger.warning(f"Skip {song_id} ({name}): {error}")
                     continue
-                per_song[(song["subset"], name)].append({"id": song["song_id"], **metrics})
-                overlaps[(song["subset"], name)].append(label_overlaps(reference, mapped))
+                per_song[(subset, name)].append({"id": song_id, **metrics})
+                overlaps[(subset, name)].append(label_overlaps(reference, mapped))
 
+        return cls._write_summaries(per_song, overlaps, output_dir, logger)
+
+    @classmethod
+    def _write_summaries(
+        cls,
+        per_song: Dict[Tuple[str, str], List[Dict[str, Any]]],
+        overlaps: Dict[Tuple[str, str], List[Dict[str, Tuple[float, float]]]],
+        output_dir: str,
+        logger: Any,
+    ) -> Dict[str, Dict[str, float]]:
         summaries: Dict[str, Dict[str, float]] = {}
         for (subset, name), rows in sorted(per_song.items()):
             result_dir = os.path.join(output_dir, subset, name)
             os.makedirs(result_dir, exist_ok=True)
-            self._write_csv(os.path.join(result_dir, "per_song.csv"), rows)
+            cls._write_csv(os.path.join(result_dir, "per_song.csv"), rows)
 
             summary = summarize(rows, overlaps[(subset, name)])
-            self._write_csv(os.path.join(result_dir, "summary.csv"), [summary])
+            cls._write_csv(os.path.join(result_dir, "summary.csv"), [summary])
             summaries[f"{subset}/{name}"] = summary
-            self.logger.info(f"[{subset}/{name}] " + ", ".join(f"{k}={summary[k]:.4f}" for k in ["HR.5F", "HR3F", "HR1F", "PWF", "Sf", "acc", "iou"]))
+            logger.info(f"[{subset}/{name}] " + ", ".join(f"{k}={summary[k]:.4f}" for k in ["HR.5F", "HR3F", "HR1F", "PWF", "Sf", "acc", "iou"]))
 
         if summaries:
-            self._write_markdown(os.path.join(output_dir, "summary.md"), summaries)
-        self.logger.info(f"Results saved to {output_dir}")
+            cls._write_markdown(os.path.join(output_dir, "summary.md"), summaries)
+        logger.info(f"Results saved to {output_dir}")
         return summaries
 
     @staticmethod

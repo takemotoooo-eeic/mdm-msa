@@ -99,6 +99,9 @@ class _Schedule(nn.Module):
         assert _log_add_exp(buffers["log_cumprod_ct"], buffers["log_1_min_cumprod_ct"]).abs().sum().item() < 1.0e-5
         for name, value in buffers.items():
             self.register_buffer(name, value.float(), persistent=False)
+        # float64 cumulative probabilities for multi-step transitions (beta = (1 - alpha - gamma) / K needs them).
+        for name in ("att", "ctt"):
+            self.register_buffer(f"cumprod_{name[0]}t64", tensors[name], persistent=False)
 
 
 class D3RMDiffusion(nn.Module):
@@ -191,6 +194,45 @@ class D3RMDiffusion(nn.Module):
         q_log_sum_exp = torch.logsumexp(q, dim=1, keepdim=True)
         q = q - q_log_sum_exp
         log_ev = self._q_pred(s, q, t - 1) + log_qt_one_timestep + q_log_sum_exp
+        return torch.clamp(log_ev, -70, 0)
+
+    def _q_posterior_skip(self, sch: _Schedule, log_x_start: torch.Tensor, log_x_t: torch.Tensor, t: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        """``q(x_s | x_t, x_0)`` for any ``-1 <= s < t`` (``s = -1`` is ``x_0``), averaged over ``x_0``.
+
+        Not in the reference, which always steps ``t -> t - 1``. Mask-and-uniform matrices are closed under products,
+        so ``q(x_t | x_s)`` has the same form with ``alpha = abar_t / abar_s``, ``1 - gamma = (1 - gbar_t) / (1 - gbar_s)``
+        and ``beta = (1 - alpha - gamma) / K``; this is :meth:`_q_posterior` with those multi-step parameters in place of
+        the one-step ones (identical to it for ``s = t - 1`` up to float error).
+        """
+        assert bool((s < t).all()) and s.min().item() >= -1
+        batch_size, _, length = log_x_start.shape
+        shape = log_x_start.shape
+        s_index = (s + (self.num_timesteps + 1)) % (self.num_timesteps + 1)
+        mask = (_log_onehot_to_index(log_x_t) == self.num_classes - 1).unsqueeze(1)
+        log_one_vector = torch.zeros(batch_size, 1, 1).type_as(log_x_t)
+        log_zero_vector = torch.log(log_one_vector + 1.0e-30).expand(-1, -1, length)
+
+        # Transition s -> t, in float64 as alpha_schedule does (1 - alpha - gamma is tiny).
+        a = _extract(sch.cumprod_at64, t, shape) / _extract(sch.cumprod_at64, s_index, shape)
+        one_min_c = (1 - _extract(sch.cumprod_ct64, t, shape)) / (1 - _extract(sch.cumprod_ct64, s_index, shape))
+        c = 1 - one_min_c
+        b = (1 - a - c) / (self.num_classes - 1)
+        log_a, log_b, log_c, log_1_min_c = (torch.log(x.clamp(min=1e-40)).float() for x in (a, b, c, one_min_c))
+
+        log_qt = self._q_pred(sch, log_x_t, t)[:, :-1, :]
+        ct_cumprod_vector = _extract(sch.log_cumprod_ct, t, shape).expand(-1, self.num_classes - 1, -1)
+        log_qt = (~mask) * log_qt + mask * ct_cumprod_vector
+
+        log_qt_skip = torch.cat([_log_add_exp(log_x_t[:, :-1, :] + log_a, log_b), _log_add_exp(log_x_t[:, -1:, :] + log_1_min_c, log_c)], dim=1)
+        log_qt_skip = torch.cat((log_qt_skip[:, :-1, :], log_zero_vector), dim=1)
+        c_vector = torch.cat((log_c.expand(-1, self.num_classes - 1, -1), log_one_vector), dim=1)
+        log_qt_skip = (~mask) * log_qt_skip + mask * c_vector
+
+        q = log_x_start[:, :-1, :] - log_qt
+        q = torch.cat((q, log_zero_vector), dim=1)
+        q_log_sum_exp = torch.logsumexp(q, dim=1, keepdim=True)
+        q = q - q_log_sum_exp
+        log_ev = self._q_pred(sch, q, s) + log_qt_skip + q_log_sum_exp
         return torch.clamp(log_ev, -70, 0)
 
     @staticmethod
@@ -287,27 +329,63 @@ class D3RMDiffusion(nn.Module):
 
     # ----- sampling (reference: p_pred, p_sample, sample) -----
 
+    def inference_timesteps(self, num_inference_steps: Optional[int] = None) -> List[int]:
+        """Model steps visited by :meth:`sample`: ``n`` values evenly spaced from ``T - 1`` down to ``0``
+        (``n = T`` or ``None``: every step, as in the reference)."""
+        n = self.num_timesteps if num_inference_steps is None else int(num_inference_steps)
+        if not 1 <= n <= self.num_timesteps:
+            raise ValueError(f"num_inference_steps must be in [1, {self.num_timesteps}], got {n}")
+        if n == 1:
+            return [self.num_timesteps - 1]
+        steps = torch.linspace(self.num_timesteps - 1, 0, n).round().long().tolist()
+        return sorted(set(steps), reverse=True)
+
     @torch.no_grad()
-    def sample(self, denoise: Denoiser, batch_size: int, length: int, device: torch.device, return_trajectory: bool = False) -> Dict[str, torch.Tensor]:
-        """Ancestral sampling from the fully masked sequence over all ``T`` steps.
+    def sample(
+        self,
+        denoise: Denoiser,
+        batch_size: int,
+        length: int,
+        device: torch.device,
+        num_inference_steps: Optional[int] = None,
+        return_trajectory: bool = False,
+        final_argmax: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Ancestral sampling from the fully masked sequence.
+
+        With ``num_inference_steps = n < T`` the model is called at :meth:`inference_timesteps` and each move
+        ``x_t -> x_s`` (``s``: next visited step, ``-1`` = ``x_0`` after the last one) samples from the exact multi-step
+        posterior :meth:`_q_posterior_skip`. ``n = T`` (default) is the reference sampler.
+
+        ``final_argmax`` takes the argmax over the real classes at the last move (to ``x_0``) instead of sampling it
+        (not in the reference). With ``n = 1`` this is the one-step prediction ``x0_first``.
 
         Returns:
             ``tokens`` ``(B, L)`` and ``x0_first`` ``(B, L)``: argmax of ``p(x_0 | x_T)`` at the first step
-            (the one-step prediction). With ``return_trajectory``, ``trajectory`` ``(T, B, L)`` holds ``x_{t-1}`` after
+            (the one-step prediction). With ``return_trajectory``, ``trajectory`` ``(n, B, L)`` holds the tokens after
             every step.
         """
         schedule = self.reverse_schedule if self.reverse_sampling else self.forward_schedule
+        steps = self.inference_timesteps(num_inference_steps)
+        full = len(steps) == self.num_timesteps
         # Fully masked start (reference: sample_from_fully_masked=True); clamped log one-hot instead of log(0).
         log_z = _index_to_log_onehot(torch.full((batch_size, length), self.mask_token, device=device, dtype=torch.long), self.num_classes)
         x0_first = None
         trajectory = []
-        for diffusion_index in range(self.num_timesteps - 1, -1, -1):
+        for index, diffusion_index in enumerate(steps):
             t = torch.full((batch_size,), diffusion_index, device=device, dtype=torch.long)
             log_x_recon = self.predict_start(denoise, log_z, t)
             if x0_first is None:
                 x0_first = log_x_recon[:, :-1, :].argmax(1)
-            model_log_prob = self._q_posterior(schedule, log_x_recon, log_z, t)
-            log_z = self._log_sample_categorical(model_log_prob, self.num_classes)
+            if full:
+                model_log_prob = self._q_posterior(schedule, log_x_recon, log_z, t)
+            else:
+                s = torch.full_like(t, steps[index + 1] if index + 1 < len(steps) else -1)
+                model_log_prob = self._q_posterior_skip(schedule, log_x_recon, log_z, t, s)
+            if final_argmax and index == len(steps) - 1:
+                log_z = _index_to_log_onehot(model_log_prob[:, :-1, :].argmax(1), self.num_classes)
+            else:
+                log_z = self._log_sample_categorical(model_log_prob, self.num_classes)
             if return_trajectory:
                 trajectory.append(_log_onehot_to_index(log_z))
         out = {"tokens": _log_onehot_to_index(log_z), "x0_first": x0_first}

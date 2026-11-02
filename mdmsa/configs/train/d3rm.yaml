@@ -22,8 +22,11 @@ diffuser:
   time_sampling: importance
 
 validation:
+  every: 400  # full T-step sampling makes validation slow (songformer_label: 100)
   sample: true  # full T-step sampling for acc (acc_onestep is always reported)
   max_sample_batches:  # null: every validation slice
 
 evaluation:
   prediction: sample  # sample | onestep
+  num_inference_steps:  # sampling steps, evenly spaced over T (null: all T, as in the reference)
+  final_argmax: false  # argmax instead of sampling at the last move to x_0 (not in the reference)

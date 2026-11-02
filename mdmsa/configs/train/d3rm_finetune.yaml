@@ -1,0 +1,12 @@
+# Two-stage D3RM fine-tuning from released SongFormer weights. Use with model=songformer_d3rm_finetune,
+# optimizer=songformer_finetune (lr of the pretrained body), loss=d3rm.
+defaults:
+  - d3rm
+  - _self_
+
+trainer:
+  _target_: mdmsa.utils.driver.D3RMTwoStageTrainer.build_from_config
+
+freeze:
+  iterations: 500  # stage 1: only the new parameters (label-token embedding, AdaLN step conditioning) train
+  new_lr: 5.0e-4  # lr of the new parameters in both stages (the body uses optimizer.lr)

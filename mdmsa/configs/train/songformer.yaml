@@ -48,6 +48,11 @@ evaluation:
     normal:
     prechorus2verse: verse
     prechorus2chorus: chorus
+  # Subset -> {predicted label: label}, renamed in the estimates before the label_mappings above (saved estimations
+  # stay as predicted). RWC-P references have no inst: instrumental passages are annotated as bridge.
+  estimate_label_mappings:
+    RWC-P:
+      inst: bridge
 
 output:
   model:

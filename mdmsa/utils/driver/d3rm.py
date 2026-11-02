@@ -107,8 +107,12 @@ class D3RMTrainer(LabelSongFormerTrainer):
 
 
 class D3RMEvaluator(LabelSongFormerEvaluator):
-    """Labels every chunk by ``T``-step ancestral sampling (``train.evaluation.prediction: sample``) or by the
-    one-step prediction ``argmax p(x_0 | x_T)`` (``onestep``). Chunk one-hots are averaged where chunks overlap."""
+    """Labels every chunk by ancestral sampling (``train.evaluation.prediction: sample``) or by the one-step prediction
+    ``argmax p(x_0 | x_T)`` (``onestep``). Chunk one-hots are averaged where chunks overlap.
+
+    ``train.evaluation.num_inference_steps`` (``null``: all ``T``) samples with that many evenly spaced steps
+    (:meth:`mdmsa.models.D3RMDiffusion.sample`); ``train.evaluation.final_argmax`` takes the argmax instead of sampling
+    at the last move to ``x_0``."""
 
     diffuser: nn.Module
 
@@ -118,7 +122,15 @@ class D3RMEvaluator(LabelSongFormerEvaluator):
         with autocast(device_type=self.device_type, enabled=self.enable_amp, dtype=self.dtype):
             denoise = _denoiser(self.model, embeddings, dataset_ids, None)
             if prediction == "sample":
-                tokens = self.diffuser.sample(denoise, 1, length, self.device)["tokens"][0]
+                steps = self.config.train.evaluation.get("num_inference_steps")
+                tokens = self.diffuser.sample(
+                    denoise,
+                    1,
+                    length,
+                    self.device,
+                    num_inference_steps=steps,
+                    final_argmax=bool(self.config.train.evaluation.get("final_argmax", False)),
+                )["tokens"][0]
             elif prediction == "onestep":
                 masked = torch.full((1, length), self.diffuser.mask_token, device=self.device, dtype=torch.long)
                 t = torch.full((1,), self.diffuser.num_timesteps - 1, device=self.device, dtype=torch.long)

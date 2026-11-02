@@ -118,10 +118,19 @@ class SongFormerD3RM(SongFormer):
             state[key] = state[key][rows]
 
         missing, unexpected = self.load_state_dict(state, strict=False)
-        new = ("label_token_embed.", ".emb.", ".linear.")
-        bad_missing = [k for k in missing if not any(n in k for n in new)]
+        new = set(self.new_parameter_names())
+        bad_missing = [k for k in missing if k not in new]
         if bad_missing or unexpected:
             raise RuntimeError(f"Pretrained weights do not match: missing={bad_missing}, unexpected={unexpected}")
+
+    def new_parameter_names(self) -> List[str]:
+        """Parameters added to SongFormer (label-token embedding, AdaLN step embedding and scale/shift projection),
+        i.e. those that :meth:`load_pretrained` leaves at their init. The reused LayerNorm ``gamma`` is not new."""
+        names = [f"label_token_embed.{n}" for n, _ in self.label_token_embed.named_parameters()]
+        for prefix, module in self.named_modules():
+            if isinstance(module, TimestepAdaLayerNorm):
+                names += [f"{prefix}.{n}" for n, _ in module.named_parameters() if n.startswith(("emb.", "linear."))]
+        return names
 
     def encode_audio(self, embeddings: torch.Tensor, dataset_ids: torch.Tensor) -> torch.Tensor:
         """Downsampled audio features with the dataset prefix, ``(B, T, D)``; reused across diffusion steps."""
